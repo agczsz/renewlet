@@ -8,19 +8,23 @@ import {
   REPEAT_REMINDER_INTERVALS,
   REPEAT_REMINDER_WINDOWS,
   SUBSCRIPTION_STATUSES,
+  isValidDateOnly,
 } from "./runtime";
+import { moneyStringSchema } from "./money";
+
+const dateOnlyFixtureSchema = z.string().refine(isValidDateOnly, "Invalid date");
 
 const notificationSubscriptionFixtureSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
-  price: z.number(),
+  price: moneyStringSchema,
   currency: z.string().min(1),
   status: z.enum(SUBSCRIPTION_STATUSES),
   billingCycle: z.enum(BILLING_CYCLES),
   oneTimeTermCount: z.number().int().positive().optional(),
   oneTimeTermUnit: z.enum(CUSTOM_CYCLE_UNITS).optional(),
-  nextBillingDate: z.string().min(1),
-  trialEndDate: z.string().optional(),
+  nextBillingDate: dateOnlyFixtureSchema,
+  trialEndDate: dateOnlyFixtureSchema.optional(),
   reminderDays: z.number().int(),
   repeatReminderEnabled: z.boolean(),
   repeatReminderInterval: z.enum(REPEAT_REMINDER_INTERVALS),

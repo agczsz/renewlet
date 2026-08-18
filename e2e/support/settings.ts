@@ -3,9 +3,15 @@ import { expect, type Locator, type Page } from "@playwright/test";
 function extractRemoteTestPhone(payload: unknown): string | null {
   if (!payload || typeof payload !== "object") return null;
 
-  const record = Array.isArray((payload as { items?: unknown }).items)
-    ? (payload as { items: unknown[] }).items[0]
-    : payload;
+  const data = (payload as { data?: unknown }).data;
+  const settings = data && typeof data === "object" && !Array.isArray(data)
+    ? (data as { settings?: unknown }).settings
+    : null;
+  const record = settings && typeof settings === "object" && !Array.isArray(settings)
+    ? settings
+    : Array.isArray((payload as { items?: unknown }).items)
+      ? (payload as { items: unknown[] }).items[0]
+      : payload;
   if (!record || typeof record !== "object") return null;
 
   const value = (record as { testPhone?: unknown }).testPhone;
@@ -17,7 +23,7 @@ export async function gotoSettingsAfterHydration(page: Page) {
   const settingsRead = page.waitForResponse((response) => (
     response.request().method() === "GET"
     && response.status() === 200
-    && response.url().includes("/api/collections/settings/records")
+    && response.url().includes("/api/app/settings")
   ));
 
   await page.goto("/settings");
@@ -32,11 +38,12 @@ export async function gotoSettingsAfterHydration(page: Page) {
 }
 
 export function getSettingsSaveButton(page: Page) {
-  return page.getByRole("button", { name: /^(保存更改|Save changes)$/ });
+  // 设置页已有 Turnstile 独立保存/放弃按钮；全局草稿操作必须限定底部保存栏，避免同名按钮误匹配。
+  return page.getByTestId("settings-save-bar").getByRole("button", { name: /^(保存更改|Save changes)$/ });
 }
 
 export function getSettingsDiscardButton(page: Page) {
-  return page.getByRole("button", { name: /^(放弃更改|Discard changes)$/ });
+  return page.getByTestId("settings-save-bar").getByRole("button", { name: /^(放弃更改|Discard changes)$/ });
 }
 
 export async function fillChangedTestPhone(input: Locator) {

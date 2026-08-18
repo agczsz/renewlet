@@ -18,10 +18,10 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -29,6 +29,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkSyncRenewletUpstream } from "./check-deploy-sync-upstream.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const deployScript = join(repoRoot, "deploy/docker-deploy.sh");
@@ -44,28 +45,6 @@ function run(command, args, options = {}) {
     throw new Error(
       [
         `Command failed: ${command} ${args.join(" ")}`,
-        result.stdout.trim(),
-        result.stderr.trim(),
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    );
-  }
-
-  return result;
-}
-
-function runIn(cwd, command, args, options = {}) {
-  const result = spawnSync(command, args, {
-    cwd,
-    encoding: "utf8",
-    ...options,
-  });
-
-  if (result.status !== 0) {
-    throw new Error(
-      [
-        `Command failed in ${cwd}: ${command} ${args.join(" ")}`,
         result.stdout.trim(),
         result.stderr.trim(),
       ]
@@ -117,18 +96,6 @@ function prepareFakeDocker(tempDir) {
   );
   chmodSync(dockerPath, 0o755);
   return binDir;
-}
-
-function writeText(path, content) {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, content);
-}
-
-function initGitRepo(path) {
-  mkdirSync(path, { recursive: true });
-  runIn(path, "git", ["init", "-b", "main"]);
-  runIn(path, "git", ["config", "user.name", "Renewlet Test"]);
-  runIn(path, "git", ["config", "user.email", "renewlet-test@example.invalid"]);
 }
 
 function runDeployScript(tempDir) {
@@ -209,6 +176,80 @@ function checkComposeConfig() {
   run("docker", ["compose", "-f", "docker-compose.ghcr.yml", "config"]);
 }
 
+function checkGoToolchainConsistency() {
+  const goModPath = join(repoRoot, "apps/docker-server/go.mod");
+  const goDirectives = [...readFileSync(goModPath, "utf8").matchAll(/^go\s+(\d+\.\d+\.\d+)\s*$/gm)];
+  if (goDirectives.length !== 1) {
+    throw new Error("apps/docker-server/go.mod must contain exactly one patch-level Go directive.");
+  }
+  const goVersion = goDirectives[0][1];
+
+  const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+  const dockerBuilder = /^FROM(?:\s+--platform=\S+)?\s+golang:(?<version>\d+\.\d+\.\d+)-\S+\s+AS\s+server-builder\s*$/m.exec(
+    dockerfile,
+  );
+  if (!dockerBuilder?.groups?.version) {
+    throw new Error("Dockerfile must keep a patch-pinned golang server-builder image.");
+  }
+  if (dockerBuilder.groups.version !== goVersion) {
+    throw new Error(
+      `Dockerfile Go version ${dockerBuilder.groups.version} must match go.mod ${goVersion}.`,
+    );
+  }
+
+  const workflowDir = join(repoRoot, ".github/workflows");
+  const workflowFiles = readdirSync(workflowDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && /\.ya?ml$/.test(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+  let setupGoCount = 0;
+
+  // go.mod 是漏洞扫描、CI 构建和 Docker 发布的唯一 Go 版本源；漂移会把未修复的标准库带进成品。
+  for (const workflowFile of workflowFiles) {
+    const lines = readFileSync(join(workflowDir, workflowFile), "utf8").split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      const usesMatch = /^(?<indent>\s*)(?:-\s+)?uses:\s*actions\/setup-go@\S+\s*$/.exec(
+        lines[index],
+      );
+      if (!usesMatch?.groups) {
+        continue;
+      }
+
+      setupGoCount += 1;
+      const usesIndent = usesMatch.groups.indent.length;
+      let stepEnd = lines.length;
+      for (let candidate = index + 1; candidate < lines.length; candidate += 1) {
+        const nextStep = /^(?<indent>\s*)-\s+/.exec(lines[candidate]);
+        if (nextStep?.groups && nextStep.groups.indent.length <= usesIndent) {
+          stepEnd = candidate;
+          break;
+        }
+      }
+
+      const stepLines = lines.slice(index, stepEnd);
+      const versionFileValues = stepLines.flatMap((line) => {
+        const match = /^\s*go-version-file:\s*(?<value>.+?)\s*$/.exec(line);
+        return match?.groups ? [match.groups.value.replace(/^['"]|['"]$/g, "")] : [];
+      });
+      if (stepLines.some((line) => /^\s*go-version:\s*/.test(line))) {
+        throw new Error(`${workflowFile} setup-go step must not hardcode go-version.`);
+      }
+      if (
+        versionFileValues.length !== 1 ||
+        versionFileValues[0] !== "apps/docker-server/go.mod"
+      ) {
+        throw new Error(
+          `${workflowFile} setup-go step must use go-version-file: apps/docker-server/go.mod.`,
+        );
+      }
+    }
+  }
+
+  if (setupGoCount === 0) {
+    throw new Error("At least one GitHub Actions workflow must configure actions/setup-go.");
+  }
+}
+
 function checkDockerSelfUpdateLayout() {
   const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
   const entrypoint = readFileSync(join(repoRoot, "deploy/docker-entrypoint.sh"), "utf8");
@@ -253,7 +294,7 @@ function checkDockerSelfUpdateLayout() {
     "uses: actions/github-script@v9.0.0",
     "item.draft && item.tag_name === tag",
     "github.rest.repos.deleteRelease",
-    "uses: softprops/action-gh-release@v3.0.0",
+    "uses: softprops/action-gh-release@v3.0.2",
     "fail_on_unmatched_files: true",
   ]) {
     if (!releaseWorkflow.includes(snippet)) {
@@ -283,17 +324,56 @@ function checkDockerCustomHeadScriptEnv() {
   }
 }
 
+function checkDockerProxyEnv() {
+  const proxyEnvNames = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"];
+  const docsAndEnvFiles = [
+    ".env.example",
+    "deploy/env.example",
+    "README.md",
+    "README.zh-CN.md",
+  ];
+  const composeFiles = [
+    "docker-compose.yml",
+    "docker-compose.ghcr.yml",
+    "deploy/docker-compose.yml",
+  ];
+
+  // Docker/Go 代理依赖大小写标准 env；文档、env 示例或 compose 漏任一处都会让用户配置静默失效。
+  // Issue #42 只承诺 ProxyFromEnvironment 语义，ALL_PROXY 需要另行设计优先级与 NO_PROXY 行为。
+  for (const relativePath of docsAndEnvFiles) {
+    const content = readFileSync(join(repoRoot, relativePath), "utf8");
+    for (const envName of proxyEnvNames) {
+      if (!content.includes(envName)) {
+        throw new Error(`${relativePath} must document Docker upstream proxy env ${envName}.`);
+      }
+    }
+  }
+
+  for (const relativePath of composeFiles) {
+    const content = readFileSync(join(repoRoot, relativePath), "utf8");
+    for (const envName of proxyEnvNames) {
+      const snippet = `${envName}: \${${envName}:-}`;
+      if (!content.includes(snippet)) {
+        throw new Error(`${relativePath} must pass through Docker upstream proxy env ${envName}.`);
+      }
+    }
+  }
+}
+
 function checkCloudflareDeployMigrationScript() {
   const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
   const deployScript = packageJson.scripts?.deploy;
   const deployCloudflareScript = packageJson.scripts?.["deploy:cloudflare"];
   const buildCloudflareScript = packageJson.scripts?.["build:cloudflare"];
   const devScript = packageJson.scripts?.["dev:cloudflare"];
+  const checkDeployScript = packageJson.scripts?.["check:deploy"];
   const migrationScript = packageJson.scripts?.["cloudflare:migrations:apply"];
+  const queuesEnsureScript = packageJson.scripts?.["cloudflare:queues:ensure"];
+  const migrationRunnerScript = readFileSync(join(repoRoot, "scripts/apply-cloudflare-d1-migrations.mjs"), "utf8");
 
-  // Deploy Button 和自管 Wrangler 部署都依赖这个顺序：先确认生产 headers，再迁移 D1，最后更新 Worker。
-  if (deployScript !== "node scripts/prepare-cloudflare-local-headers.mjs --check-production && pnpm cloudflare:migrations:apply && wrangler deploy") {
-    throw new Error("package.json deploy script must check production Cloudflare headers before remote migration and wrangler deploy.");
+  // Deploy Button 和自管 Wrangler 部署都依赖这个顺序：先确认生产 headers，再迁移 D1/确保队列，最后更新 Worker。
+  if (deployScript !== "node scripts/prepare-cloudflare-local-headers.mjs --check-production && pnpm cloudflare:migrations:apply && pnpm cloudflare:queues:ensure && wrangler deploy") {
+    throw new Error("package.json deploy script must check production Cloudflare headers before remote migration, Queue setup, and wrangler deploy.");
   }
   if (deployCloudflareScript !== "pnpm build:cloudflare && pnpm deploy") {
     throw new Error("package.json deploy:cloudflare must rebuild production Cloudflare assets before deploy.");
@@ -301,16 +381,35 @@ function checkCloudflareDeployMigrationScript() {
   if (buildCloudflareScript !== "VITE_RENEWLET_RUNTIME=cloudflare pnpm --filter @renewlet/client build") {
     throw new Error("package.json build:cloudflare must keep the production client build without local HTTP header rewrites.");
   }
-  if (migrationScript !== "wrangler d1 migrations apply DB --remote") {
-    throw new Error("package.json cloudflare:migrations:apply must target the DB binding with remote D1 migrations.");
+  if (checkDeployScript !== "node scripts/check-deploy-config.mjs && node --test scripts/ensure-cloudflare-queues.test.mjs scripts/apply-cloudflare-d1-migrations.test.mjs") {
+    throw new Error("package.json check:deploy must include Cloudflare deployment helper tests.");
   }
-  if (devScript !== "pnpm build:cloudflare && node scripts/prepare-cloudflare-local-headers.mjs && pnpm cloudflare:migrations:apply:local && node scripts/cloudflare-dev-hint.mjs && wrangler dev --test-scheduled") {
-    throw new Error("package.json dev:cloudflare must prepare local HTTP headers, print the local Cron hint, and enable Wrangler scheduled middleware.");
+  if (migrationScript !== "node scripts/apply-cloudflare-d1-migrations.mjs") {
+    throw new Error("package.json cloudflare:migrations:apply must use the retry-aware remote D1 migration helper.");
+  }
+  if (queuesEnsureScript !== "node scripts/ensure-cloudflare-queues.mjs") {
+    throw new Error("package.json cloudflare:queues:ensure must keep the idempotent Queue creation helper.");
+  }
+  if (devScript !== "pnpm build:cloudflare && node scripts/prepare-cloudflare-local-headers.mjs && pnpm cloudflare:migrations:apply:local && node scripts/cloudflare-dev-hint.mjs && node scripts/cloudflare-dev-wrangler.mjs --test-scheduled") {
+    throw new Error("package.json dev:cloudflare must prepare local HTTP headers, print the local Cron hint, inject local proxy settings for Wrangler, and enable Wrangler scheduled middleware.");
+  }
+  // D1 远端 migration 偶发 7429/reset 时可以重试；权限、SQL 和 binding 错误仍必须保持失败。
+  for (const snippet of [
+    "D1 DB storage operation exceeded timeout",
+    "\\[code:\\s*7429\\]",
+    "Network connection lost",
+    "arg === \"--\" && index === 0",
+    "non-retryable error",
+    "failed after",
+  ]) {
+    if (!migrationRunnerScript.includes(snippet)) {
+      throw new Error(`apply-cloudflare-d1-migrations.mjs must keep retry boundary snippet: ${snippet}`);
+    }
   }
 }
 
 function checkCloudflareStaticAssetHeadersContract() {
-  const publicHeaders = readFileSync(join(repoRoot, "packages/client/public/_headers"), "utf8");
+  const publicHeaders = readFileSync(join(repoRoot, "apps/web/public/_headers"), "utf8");
   const localHeadersScript = readFileSync(join(repoRoot, "scripts/prepare-cloudflare-local-headers.mjs"), "utf8");
 
   // 生产 Cloudflare HTTPS 入口继续使用强 CSP；只有 ignored 的 dist 文件能被本地 HTTP dev 放宽。
@@ -320,14 +419,14 @@ function checkCloudflareStaticAssetHeadersContract() {
     "upgrade-insecure-requests",
   ]) {
     if (!publicHeaders.includes(snippet)) {
-      throw new Error(`packages/client/public/_headers must keep production CSP snippet: ${snippet}`);
+      throw new Error(`apps/web/public/_headers must keep production CSP snippet: ${snippet}`);
     }
   }
   if (publicHeaders.includes("img-src 'self' data: blob: http: https:")) {
-    throw new Error("packages/client/public/_headers must not use the local HTTP img-src policy.");
+    throw new Error("apps/web/public/_headers must not use the local HTTP img-src policy.");
   }
   for (const snippet of [
-    "packages/client/dist/_headers",
+    "apps/web/dist/_headers",
     "upgrade-insecure-requests",
     "img-src 'self' data: blob: http: https:",
     "--check-production",
@@ -350,6 +449,41 @@ function checkCloudflareScheduledLocalRoute() {
   // Wrangler 的 /cdn-cgi scheduled 测试入口在 Workers Static Assets 下会先打到 asset proxy；Renewlet 本地 Cron 固定走 /__scheduled。
   if (!runWorkerFirst.includes('"/__scheduled"')) {
     throw new Error('wrangler.jsonc assets.run_worker_first must include "/__scheduled" for local Cron testing.');
+  }
+}
+
+function checkCloudflareQueueConfig() {
+  const wranglerConfig = readFileSync(join(repoRoot, "wrangler.jsonc"), "utf8");
+  const queueEnsureScript = readFileSync(join(repoRoot, "scripts/ensure-cloudflare-queues.mjs"), "utf8");
+  const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
+  const packageBindings = packageJson.cloudflare?.bindings ?? {};
+
+  // 图标索引 refresh 不能再走 HTTP 重活；Queue/DLQ 名和 consumer 串行度是 Cloudflare 稳定性的部署契约。
+  for (const snippet of [
+    '"binding": "MEDIA_ICON_INDEX_REFRESH_QUEUE"',
+    '"queue": "renewlet-media-icon-index-refresh"',
+    '"max_batch_size": 1',
+    '"max_retries": 5',
+    '"dead_letter_queue": "renewlet-media-icon-index-refresh-dlq"',
+    '"max_concurrency": 1',
+  ]) {
+    if (!wranglerConfig.includes(snippet)) {
+      throw new Error(`wrangler.jsonc must keep media icon Queue config snippet: ${snippet}`);
+    }
+  }
+  if (!Object.hasOwn(packageBindings, "MEDIA_ICON_INDEX_REFRESH_QUEUE")) {
+    throw new Error("package.json cloudflare.bindings must document MEDIA_ICON_INDEX_REFRESH_QUEUE.");
+  }
+  // Queue create 不是幂等 API；already taken 只能在二次 info 确认存在后视为 ready。
+  for (const snippet of [
+    'runWranglerQueueCommand("info", name)',
+    'runWranglerQueueCommand("create", name)',
+    "\\b11009\\b|already taken",
+    "create conflicted but the queue could not be confirmed",
+  ]) {
+    if (!queueEnsureScript.includes(snippet)) {
+      throw new Error(`ensure-cloudflare-queues.mjs must keep idempotent Queue ensure snippet: ${snippet}`);
+    }
   }
 }
 
@@ -401,7 +535,7 @@ function checkCloudflareDeployButtonVars() {
 }
 
 function checkCloudflareDeployButtonVersionFallback() {
-  const workerSystem = readFileSync(join(repoRoot, "packages/cloudflare/src/system.ts"), "utf8");
+  const workerSystem = readFileSync(join(repoRoot, "apps/worker/src/system.ts"), "utf8");
 
   // Deploy Button 不一定有 CI 版本变量；Worker 缺元信息时必须显示 package stable version，不能再合成 dev 后缀。
   for (const snippet of [
@@ -444,6 +578,9 @@ function checkCloudflareWorkflowBuildMetadata() {
     "SHORT_SHA=\"${GITHUB_SHA::7}\"",
     "RENEWLET_VERSION=${PACKAGE_VERSION}-dev+${SHORT_SHA}",
     "RENEWLET_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "pnpm cloudflare:migrations:apply --config \"$CI_WRANGLER_CONFIG\"",
+    "Ensure Cloudflare Queues",
+    "pnpm cloudflare:queues:ensure",
   ]) {
     if (!selfHostedWorkflow.includes(snippet)) {
       throw new Error(`cloudflare-worker.yml must keep build metadata snippet: ${snippet}`);
@@ -454,10 +591,64 @@ function checkCloudflareWorkflowBuildMetadata() {
     "RENEWLET_VERSION: ${{ needs.metadata.outputs.version }}",
     "RENEWLET_COMMIT: ${{ github.sha }}",
     "RENEWLET_BUILD_TIME: ${{ steps.build-time.outputs.value }}",
+    "pnpm cloudflare:migrations:apply --config \"$CI_WRANGLER_CONFIG\"",
+    "Ensure Cloudflare Queues",
+    "pnpm cloudflare:queues:ensure",
   ]) {
     if (!releaseWorkflow.includes(snippet)) {
       throw new Error(`release-publish.yml must keep production Cloudflare metadata snippet: ${snippet}`);
     }
+  }
+}
+
+function workflowTriggerBlock(content, trigger) {
+  const match = new RegExp(`^  ${trigger}:\\n(?<body>(?:    .*(?:\\n|$))*)`, "m").exec(content);
+  return match?.groups?.body ?? "";
+}
+
+function checkReleaseBranchWorkflowTriggers() {
+  const workflows = [
+    { path: ".github/workflows/ci.yml", name: "CI" },
+    { path: ".github/workflows/build-smoke.yml", name: "Build Smoke" },
+  ];
+
+  // main/release push 不跑分支质量门；合并前看 PR，发布看 tag，避免稳定版合入后和 Release Publish 重复。
+  for (const workflow of workflows) {
+    const content = readFileSync(join(repoRoot, workflow.path), "utf8");
+    const pullRequestBlock = workflowTriggerBlock(content, "pull_request");
+    const pushBlock = workflowTriggerBlock(content, "push");
+
+    for (const snippet of ["      - dev", "      - main", '      - "release/**"']) {
+      if (!pullRequestBlock.includes(snippet)) {
+        throw new Error(`${workflow.name} pull_request trigger must keep branch snippet: ${snippet.trim()}`);
+      }
+    }
+    for (const snippet of ["      - dev"]) {
+      if (!pushBlock.includes(snippet)) {
+        throw new Error(`${workflow.name} push trigger must keep branch snippet: ${snippet.trim()}`);
+      }
+    }
+    for (const blockedBranch of ["      - main", "release/"]) {
+      if (pushBlock.includes(blockedBranch)) {
+        throw new Error(`${workflow.name} push trigger must not include ${blockedBranch.trim()}; release checks run on PR and tag workflows.`);
+      }
+    }
+  }
+
+  const releaseWorkflow = readFileSync(join(repoRoot, ".github/workflows/release-publish.yml"), "utf8");
+  for (const snippet of [
+    "Validate stable tag source",
+    "github.repository == 'zhiyingzzhou/renewlet' && steps.version.outputs.is-stable == 'true'",
+    "git fetch origin main:refs/remotes/origin/main",
+    "git merge-base --is-ancestor \"$TAG_SHA\" \"$MAIN_SHA\"",
+  ]) {
+    if (!releaseWorkflow.includes(snippet)) {
+      throw new Error(`release-publish.yml must keep stable tag source guard: ${snippet}`);
+    }
+  }
+
+  if (!readFileSync(join(repoRoot, ".github/workflows/build-smoke.yml"), "utf8").includes("workflow_dispatch:")) {
+    throw new Error("Build Smoke must keep workflow_dispatch for manual no-secret build verification.");
   }
 }
 
@@ -493,294 +684,25 @@ function checkRuntimeReleaseSecretPathRemoved() {
   }
 }
 
-function findJsonBinding(config, key, binding) {
-  const match = Array.isArray(config[key])
-    ? config[key].find((item) => item && typeof item === "object" && item.binding === binding)
-    : undefined;
-  if (!match) throw new Error(`Expected ${binding} in ${key}.`);
-  return match;
-}
-
-function readJson(path) {
-  return JSON.parse(readFileSync(path, "utf8"));
-}
-
-function preserveCloudflareGeneratedConfig(repoPath) {
-  const config = readJson(join(repoPath, "wrangler.jsonc"));
-  const d1 = findJsonBinding(config, "d1_databases", "DB");
-  const r2 = findJsonBinding(config, "r2_buckets", "ASSETS_BUCKET");
-  return {
-    name: config.name,
-    databaseName: d1.database_name,
-    databaseId: d1.database_id,
-    bucketName: r2.bucket_name,
-    vars: config.vars && typeof config.vars === "object" && !Array.isArray(config.vars) ? config.vars : {},
-  };
-}
-
-function applyCloudflareGeneratedConfig(repoPath, preserved) {
-  const config = readJson(join(repoPath, "wrangler.jsonc"));
-  const d1 = findJsonBinding(config, "d1_databases", "DB");
-  const r2 = findJsonBinding(config, "r2_buckets", "ASSETS_BUCKET");
-  config.name = preserved.name;
-  d1.database_name = preserved.databaseName;
-  d1.database_id = preserved.databaseId;
-  r2.bucket_name = preserved.bucketName;
-  config.vars = {
-    ...(config.vars && typeof config.vars === "object" && !Array.isArray(config.vars) ? config.vars : {}),
-    ...preserved.vars,
-  };
-  writeFileSync(join(repoPath, "wrangler.jsonc"), `${JSON.stringify(config, null, 2)}\n`);
-}
-
-function simulateSyncRenewletUpstream(generatedRepo, upstreamRepo, tempDir) {
-  mkdirSync(tempDir, { recursive: true });
-  const preserved = preserveCloudflareGeneratedConfig(generatedRepo);
-  const workflowsBackup = join(tempDir, "workflows-backup");
-  const workflowsPath = join(generatedRepo, ".github/workflows");
-  if (existsSync(workflowsPath)) {
-    cpSync(workflowsPath, workflowsBackup, { recursive: true });
-  }
-
-  const existingUpstream = spawnSync("git", ["remote", "get-url", "upstream"], {
-    cwd: generatedRepo,
-    encoding: "utf8",
-  });
-  if (existingUpstream.status === 0) {
-    runIn(generatedRepo, "git", ["remote", "set-url", "upstream", upstreamRepo]);
-  } else {
-    runIn(generatedRepo, "git", ["remote", "add", "upstream", upstreamRepo]);
-  }
-  runIn(generatedRepo, "git", ["fetch", "upstream", "main"]);
-  runIn(generatedRepo, "git", ["restore", "--source", "FETCH_HEAD", "--staged", "--worktree", ":/"]);
-
-  if (existsSync(workflowsBackup)) {
-    rmSync(workflowsPath, { recursive: true, force: true });
-    mkdirSync(workflowsPath, { recursive: true });
-    cpSync(workflowsBackup, workflowsPath, { recursive: true });
-  }
-  applyCloudflareGeneratedConfig(generatedRepo, preserved);
-
-  runIn(generatedRepo, "git", ["add", "-A"]);
-  const stagedDiff = spawnSync("git", ["diff", "--cached", "--quiet"], {
-    cwd: generatedRepo,
-    encoding: "utf8",
-  });
-  if (stagedDiff.status === 0) {
-    return false;
-  }
-  if (stagedDiff.status !== 1) {
-    throw new Error(`Expected git diff --cached --quiet status 0 or 1, got ${stagedDiff.status}: ${stagedDiff.stderr}`);
-  }
-
-  const upstreamSha = runIn(generatedRepo, "git", ["rev-parse", "--short=12", "FETCH_HEAD"]).stdout.trim();
-  runIn(generatedRepo, "git", ["commit", "-m", `chore: sync Renewlet upstream ${upstreamSha}`]);
-  return true;
-}
-
-function checkSyncRenewletUpstreamWorkflow() {
-  const workflowPath = join(repoRoot, ".github/workflows/sync-renewlet-upstream.yml");
-  if (!existsSync(workflowPath)) {
-    throw new Error("sync-renewlet-upstream.yml must exist for one-click generated repositories.");
-  }
-
-  const content = readFileSync(workflowPath, "utf8");
-  for (const snippet of [
-    "name: Sync Renewlet Upstream",
-    "workflow_dispatch:",
-    "contents: write",
-    "github.repository != 'zhiyingzzhou/renewlet'",
-    "https://github.com/zhiyingzzhou/renewlet.git",
-    "git restore --source",
-    "git push origin \"HEAD:${target_branch}\"",
-  ]) {
-    if (!content.includes(snippet)) {
-      throw new Error(`sync-renewlet-upstream.yml must keep snippet: ${snippet}`);
-    }
-  }
-  const onBlock = /^on:\n(?<body>(?:  .*(?:\n|$))*)/m.exec(content)?.groups?.body ?? "";
-  if (!onBlock.includes("  workflow_dispatch:")) {
-    throw new Error("sync-renewlet-upstream.yml must keep workflow_dispatch as the only trigger.");
-  }
-  for (const forbiddenTrigger of ["  push:", "  pull_request:", "  workflow_run:", "  repository_dispatch:"]) {
-    if (onBlock.includes(forbiddenTrigger)) {
-      throw new Error(`sync-renewlet-upstream.yml must not include trigger: ${forbiddenTrigger.trim()}`);
-    }
-  }
-  for (const forbidden of ["schedule:", "git merge", "git rebase", "--allow-unrelated-histories", "--force"]) {
-    if (content.includes(forbidden)) {
-      throw new Error(`sync-renewlet-upstream.yml must not contain: ${forbidden}`);
-    }
-  }
-}
-
-function checkSyncRenewletUpstreamBehavior() {
-  const tempDir = mkdtempSync(join(tmpdir(), "renewlet-sync-upstream-"));
-  try {
-    const upstreamRepo = join(tempDir, "renewlet-upstream");
-    const generatedRepo = join(tempDir, "generated-repo");
-
-    initGitRepo(upstreamRepo);
-    writeText(
-      join(upstreamRepo, "wrangler.jsonc"),
-      `{
-  "name": "renewlet",
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "renewlet",
-      "database_id": "00000000-0000-0000-0000-000000000000"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "ASSETS_BUCKET",
-      "bucket_name": "renewlet-assets"
-    }
-  ],
-  "vars": {
-    "SETUP_ENABLED": "true",
-    "NEW_DEFAULT": "from-upstream"
-  }
-}
-`,
-    );
-    writeText(join(upstreamRepo, "upstream-file.txt"), "from upstream\n");
-    writeText(join(upstreamRepo, ".github/workflows/release-publish.yml"), "name: Release Publish\n");
-    runIn(upstreamRepo, "git", ["add", "."]);
-    runIn(upstreamRepo, "git", ["commit", "-m", "upstream snapshot"]);
-
-    initGitRepo(generatedRepo);
-    writeText(
-      join(generatedRepo, "wrangler.jsonc"),
-      `{
-  "name": "renewlet-user-worker",
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "renewlet-user-db",
-      "database_id": "11111111-2222-3333-4444-555555555555"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "ASSETS_BUCKET",
-      "bucket_name": "renewlet-user-assets"
-    }
-  ],
-  "vars": {
-    "SETUP_ENABLED": "false",
-    "CUSTOM_USER_VAR": "keep-me"
-  }
-}
-`,
-    );
-    writeText(join(generatedRepo, "generated-only.txt"), "remove me\n");
-    writeText(join(generatedRepo, ".github/workflows/sync-renewlet-upstream.yml"), "name: Sync Renewlet Upstream\n");
-    runIn(generatedRepo, "git", ["add", "."]);
-    runIn(generatedRepo, "git", ["commit", "-m", "generated snapshot"]);
-
-    if (!simulateSyncRenewletUpstream(generatedRepo, upstreamRepo, tempDir)) {
-      throw new Error("Sync workflow simulation must create a commit when upstream changed.");
-    }
-
-    if (existsSync(join(generatedRepo, "generated-only.txt"))) {
-      throw new Error("Sync workflow must remove files absent from upstream.");
-    }
-    if (!existsSync(join(generatedRepo, "upstream-file.txt"))) {
-      throw new Error("Sync workflow must restore files from upstream.");
-    }
-    if (!existsSync(join(generatedRepo, ".github/workflows/sync-renewlet-upstream.yml"))) {
-      throw new Error("Sync workflow must preserve the manual sync entrypoint.");
-    }
-    if (existsSync(join(generatedRepo, ".github/workflows/release-publish.yml"))) {
-      throw new Error("Sync workflow must preserve generated repository workflows instead of importing upstream workflows.");
-    }
-
-    const wranglerConfig = readJson(join(generatedRepo, "wrangler.jsonc"));
-    const d1 = findJsonBinding(wranglerConfig, "d1_databases", "DB");
-    const r2 = findJsonBinding(wranglerConfig, "r2_buckets", "ASSETS_BUCKET");
-    if (
-      wranglerConfig.name !== "renewlet-user-worker" ||
-      d1.database_name !== "renewlet-user-db" ||
-      d1.database_id !== "11111111-2222-3333-4444-555555555555" ||
-      r2.bucket_name !== "renewlet-user-assets" ||
-      wranglerConfig.vars.SETUP_ENABLED !== "false" ||
-      wranglerConfig.vars.CUSTOM_USER_VAR !== "keep-me" ||
-      wranglerConfig.vars.NEW_DEFAULT !== "from-upstream"
-    ) {
-      throw new Error("Sync workflow must preserve generated Wrangler resources and vars.");
-    }
-
-    const parents = runIn(generatedRepo, "git", ["rev-list", "--parents", "-n", "1", "HEAD"]).stdout.trim().split(/\s+/);
-    if (parents.length !== 2) {
-      throw new Error("Sync workflow must create a normal single-parent commit.");
-    }
-
-    const mergeBase = spawnSync("git", ["merge-base", "HEAD", "refs/remotes/upstream/main"], {
-      cwd: generatedRepo,
-      encoding: "utf8",
-    });
-    if (mergeBase.status === 0) {
-      throw new Error("Sync workflow must not merge unrelated upstream history.");
-    }
-    if (mergeBase.status !== 1) {
-      throw new Error(`Expected no merge base, got git status ${mergeBase.status}: ${mergeBase.stderr}`);
-    }
-
-    const commitCount = runIn(generatedRepo, "git", ["rev-list", "--count", "HEAD"]).stdout.trim();
-    if (simulateSyncRenewletUpstream(generatedRepo, upstreamRepo, join(tempDir, "noop"))) {
-      throw new Error("Sync workflow simulation must no-op when upstream is already applied.");
-    }
-    const noOpCommitCount = runIn(generatedRepo, "git", ["rev-list", "--count", "HEAD"]).stdout.trim();
-    if (commitCount !== noOpCommitCount) {
-      throw new Error("Sync workflow no-op must not create a commit.");
-    }
-  } finally {
-    rmSync(tempDir, { recursive: true, force: true });
-  }
-}
-
-function checkSyncRenewletUpstreamDocs() {
-  const docs = ["docs/cloudflare-workers-deploy.md", "docs/cloudflare-workers-deploy.zh-CN.md"];
-  for (const relativePath of docs) {
-    const content = readFileSync(join(repoRoot, relativePath), "utf8");
-    for (const snippet of ["Sync Renewlet Upstream", "Run workflow", ".github/workflows/sync-renewlet-upstream.yml"]) {
-      if (!content.includes(snippet)) {
-        throw new Error(`${relativePath} must document manual upstream sync: ${snippet}`);
-      }
-    }
-    for (const forbidden of [
-      "upgrade-cloudflare-generated-repo.mjs",
-      "node /tmp/renewlet-upgrade.mjs",
-      "curl -fsSL https://raw.githubusercontent.com/zhiyingzzhou/renewlet/main/scripts",
-      "git merge upstream/main",
-      "--allow-unrelated-histories",
-    ]) {
-      if (content.includes(forbidden)) {
-        throw new Error(`${relativePath} must not keep obsolete generated-repo upgrade flow: ${forbidden}`);
-      }
-    }
-  }
-}
-
 run("bash", ["-n", deployScript]);
 checkGeneratedSecrets();
 checkInvalidExistingPBKeyIsRejected();
+checkGoToolchainConsistency();
 checkDockerSelfUpdateLayout();
 checkDockerCustomHeadScriptEnv();
+checkDockerProxyEnv();
 checkCloudflareDeployMigrationScript();
 checkCloudflareStaticAssetHeadersContract();
 checkCloudflareScheduledLocalRoute();
+checkCloudflareQueueConfig();
 checkCloudflareLocalDevNetworkAccess();
 checkCloudflareFreshD1Migrations();
 checkCloudflareDeployButtonVars();
 checkCloudflareDeployButtonVersionFallback();
 checkCloudflareWorkflowBuildMetadata();
+checkReleaseBranchWorkflowTriggers();
 checkRuntimeReleaseSecretPathRemoved();
-checkSyncRenewletUpstreamWorkflow();
-checkSyncRenewletUpstreamBehavior();
-checkSyncRenewletUpstreamDocs();
+checkSyncRenewletUpstream(repoRoot);
 checkComposeConfig();
 
 console.log("Deployment configuration checks passed.");

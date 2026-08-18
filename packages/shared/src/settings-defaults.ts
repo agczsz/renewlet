@@ -1,5 +1,6 @@
 import type { ApiAppSettings } from "./schemas/settings";
 import { DEFAULT_BUILT_IN_ICON_SOURCES } from "./built-in-icons";
+import { DEFAULT_ONLINE_ICON_SOURCES } from "./online-icon-sources";
 import { DEFAULT_NOTIFICATION_REMINDER_DAYS } from "./runtime";
 
 /** 首次写入或空库读取时允许由运行面注入 locale/timezone，其它默认值保持产品一致。 */
@@ -18,13 +19,16 @@ export function createDefaultAppSettings(options: DefaultSettingsOptions = {}): 
     themeMode: "dark",
     themeVariant: "emerald",
     themeCustomColor: DEFAULT_CUSTOM_THEME_COLOR,
-    locale: options.locale ?? "zh-CN",
+    locale: options.locale ?? "en-US",
     showExpired: true,
     defaultCurrency: "CNY",
     publicStatusCurrency: "inherit",
-    exchangeRateProvider: "floatrates",
+    subscriptionPriceReferenceEnabled: false,
+    subscriptionPriceReferenceCurrency: "default",
+    exchangeRateProvider: "frankfurter",
     builtInIconSources: DEFAULT_BUILT_IN_ICON_SOURCES,
-    monthlyBudget: 1500,
+    onlineIconSources: DEFAULT_ONLINE_ICON_SOURCES,
+    monthlyBudget: "1500",
     timezone: options.timezone ?? "UTC",
     notificationTimeLocal: "08:00" as ApiAppSettings["notificationTimeLocal"],
     notificationReminderDays: DEFAULT_NOTIFICATION_REMINDER_DAYS,
@@ -32,11 +36,19 @@ export function createDefaultAppSettings(options: DefaultSettingsOptions = {}): 
     testPhone: "",
     telegramBotToken: "",
     telegramChatId: "",
+    // 默认不发送 Telegram parse_mode；富文本必须由用户显式启用，避免旧 Bot/客户端渲染差异影响通知可读性。
+    telegramMessageFormat: "plain",
     notifyxApiKey: "",
     webhookUrl: "",
     webhookMethod: "POST",
     webhookHeaders: "",
     webhookPayload: "",
+    dingtalkWebhookUrl: "",
+    dingtalkSecret: "",
+    dingtalkKeyword: "",
+    dingtalkMessageType: "markdown",
+    dingtalkTitleTemplate: "",
+    dingtalkContentTemplate: "",
     wechatWebhookUrl: "",
     wechatMessageType: "text",
     wechatAddModeTag: false,
@@ -56,6 +68,10 @@ export function createDefaultAppSettings(options: DefaultSettingsOptions = {}): 
     barkDeviceKey: "",
     barkSilentPush: false,
     serverchanSendKey: "",
+    discordWebhookUrl: "",
+    discordBotUsername: "",
+    discordBotAvatarUrl: "",
+    pushplusToken: "",
     aiRecognition: {
       providerType: "openai",
       transportProtocol: "openai-chat",

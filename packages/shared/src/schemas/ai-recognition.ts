@@ -19,6 +19,8 @@ import {
   UPSTREAM_RAW_RESPONSE_TEXT_MAX_CHARS,
   upstreamErrorDetailsSchema,
 } from "./upstream";
+import { apiSuccessResponseSchema } from "./api";
+import { moneyStringSchema } from "../money";
 
 export const AI_RECOGNITION_MAX_TEXT_CHARS = 30_000;
 export const AI_RECOGNITION_MAX_IMAGES = 5;
@@ -229,7 +231,7 @@ const generatedWarningsSchema = z.array(z.string().trim().min(1).max(240))
 
 export const aiRecognizedSubscriptionDraftSchema = z.object({
   name: z.string().trim().min(1).max(120),
-  price: z.number().finite().nonnegative().max(1_000_000_000).nullable(),
+  price: moneyStringSchema.nullable(),
   currency: z.string().trim().regex(/^[A-Z]{3}$/).nullable(),
   billingCycle: z.enum(BILLING_CYCLES).nullable(),
   customDays: z.number().int().positive().nullable(),
@@ -256,7 +258,7 @@ export const aiRecognizedSubscriptionDraftSchema = z.object({
 export type AiRecognizedSubscriptionDraft = z.infer<typeof aiRecognizedSubscriptionDraftSchema>;
 
 /** 识别 JSON 响应是非流式和 SSE final 共享的最终事实源。 */
-export const aiRecognizeResponseSchema = z.object({
+export const aiRecognizePayloadSchema = z.object({
   providerType: aiRecognitionProviderTypeSchema,
   transportProtocol: aiRecognitionTransportProtocolSchema,
   model: z.string().trim().min(1).max(160),
@@ -264,7 +266,8 @@ export const aiRecognizeResponseSchema = z.object({
   warnings: z.array(z.string().trim().min(1).max(240)).max(20),
   diagnostics: aiRecognitionDiagnosticsSchema,
 }).strict();
-export type AiRecognizeResponse = z.infer<typeof aiRecognizeResponseSchema>;
+export const aiRecognizeResponseSchema = apiSuccessResponseSchema(aiRecognizePayloadSchema);
+export type AiRecognizeResponse = z.infer<typeof aiRecognizePayloadSchema>;
 
 /** 流式识别事件只暴露 UI 状态和最终响应；partial/delta 不能被前端当成可导入草稿。 */
 export const aiRecognitionStreamStageSchema = z.enum([
@@ -300,7 +303,7 @@ const aiRecognitionStreamReasoningDeltaEventSchema = z.object({
 
 const aiRecognitionStreamFinalEventSchema = z.object({
   type: z.literal("recognition/final"),
-  response: aiRecognizeResponseSchema,
+  response: aiRecognizePayloadSchema,
 }).strict();
 
 const aiRecognitionStreamErrorEventSchema = z.object({
@@ -360,13 +363,13 @@ export const aiRecognitionTestRequestSchema = z.object({
 }).strict();
 export type AiRecognitionTestRequest = z.infer<typeof aiRecognitionTestRequestSchema>;
 
-export const aiRecognitionTestResponseSchema = z.object({
-  ok: z.literal(true),
+export const aiRecognitionTestPayloadSchema = z.object({
   providerType: aiRecognitionProviderTypeSchema,
   transportProtocol: aiRecognitionTransportProtocolSchema,
   model: z.string().trim().min(1).max(160),
 }).strict();
-export type AiRecognitionTestResponse = z.infer<typeof aiRecognitionTestResponseSchema>;
+export const aiRecognitionTestResponseSchema = apiSuccessResponseSchema(aiRecognitionTestPayloadSchema);
+export type AiRecognitionTestResponse = z.infer<typeof aiRecognitionTestPayloadSchema>;
 
 /** 模型列表只用于设置页候选展示；候选上限和 capabilities 允许 null，避免 provider 元数据差异拖垮 UI。 */
 const aiModelCapabilitySchema = z.object({
@@ -395,13 +398,14 @@ export const aiModelListItemSchema = z.object({
 }).strict();
 export type AiModelListItem = z.infer<typeof aiModelListItemSchema>;
 
-export const aiModelListResponseSchema = z.object({
+export const aiModelListPayloadSchema = z.object({
   providerType: aiRecognitionProviderTypeSchema,
   transportProtocol: aiRecognitionTransportProtocolSchema,
   models: z.array(aiModelListItemSchema).max(AI_RECOGNITION_MAX_MODEL_LIST_MODELS),
   truncated: z.boolean(),
 }).strict();
-export type AiModelListResponse = z.infer<typeof aiModelListResponseSchema>;
+export const aiModelListResponseSchema = apiSuccessResponseSchema(aiModelListPayloadSchema);
+export type AiModelListResponse = z.infer<typeof aiModelListPayloadSchema>;
 
 export const aiModelListErrorDetailsSchema = upstreamErrorDetailsSchema;
 export type AiModelListErrorDetails = z.infer<typeof aiModelListErrorDetailsSchema>;

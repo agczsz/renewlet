@@ -10,27 +10,31 @@ import {
   Sparkles,
 } from 'lucide-react'
 
+import type { WebsiteRepositoryLinks } from '../lib/website-metadata'
+
+declare const __RENEWLET_WEBSITE_REPOSITORY_LINKS__: WebsiteRepositoryLinks
+
 export type Locale = 'zh' | 'en'
 
 export type LocalizedText = Record<Locale, string>
 export type LocalizedUrl = string | LocalizedText
+export type WebsiteLinks = WebsiteRepositoryLinks & {
+  demo: string
+}
 
 export const locales: Record<Locale, { label: string; ariaLabel: string }> = {
   zh: { label: '中', ariaLabel: '切换到中文' },
   en: { label: 'EN', ariaLabel: 'Switch to English' },
 }
 
-export const links = {
-  github: 'https://github.com/zhiyingzzhou/renewlet',
-  docs: 'https://github.com/zhiyingzzhou/renewlet#readme',
-  docsZh: 'https://github.com/zhiyingzzhou/renewlet/blob/main/README.zh-CN.md',
-  cloudflare: {
-    zh: 'https://github.com/zhiyingzzhou/renewlet/blob/main/docs/cloudflare-workers-deploy.zh-CN.md',
-    en: 'https://github.com/zhiyingzzhou/renewlet/blob/main/docs/cloudflare-workers-deploy.md',
-  },
-  docker: 'https://github.com/zhiyingzzhou/renewlet/blob/main/README.zh-CN.md#快速部署',
-  license: 'https://github.com/zhiyingzzhou/renewlet/blob/main/LICENSE',
+export function createSiteLinks(repositoryLinks: WebsiteRepositoryLinks): WebsiteLinks {
+  return {
+    demo: 'https://demo.renewlet.cc/',
+    ...repositoryLinks,
+  }
 }
+
+export const links = createSiteLinks(__RENEWLET_WEBSITE_REPOSITORY_LINKS__)
 
 export const copy = {
   nav: {
@@ -48,6 +52,11 @@ export const copy = {
       en: 'Renewlet is a small self-hosted ledger for subscriptions. Add items with AI, track renewal dates, and share a public status page when you need one.',
     },
     secondaryCta: { zh: '选择部署方式', en: 'Choose deployment' },
+    demoCta: { zh: '尝试在线演示', en: 'Try live demo' },
+    demoNote: {
+      zh: '演示账号 demo@renewlet.local / renewlet-demo。数据会定期重置，请勿放真实个人信息或真实凭据。',
+      en: 'Demo account: demo@renewlet.local / renewlet-demo. The demo resets regularly; do not enter real personal data or credentials.',
+    },
     learnMore: { zh: '看看它能管住什么', en: 'See what it tracks' },
     imageAlt: {
       zh: 'Renewlet 中文仪表盘，展示月度支出、近期订阅和支出分布',
@@ -266,30 +275,34 @@ export type DeployOption = {
   action: LocalizedText
 }
 
-export const deployOptions: DeployOption[] = [
-  {
-    key: 'docker',
-    icon: Container,
-    title: { zh: 'Docker 单容器', en: 'Single Docker container' },
-    body: {
-      zh: '适合 VPS、NAS 和 homelab，数据持久化到本机目录。',
-      en: 'Best for VPS, NAS, and homelab installs with local persistent data.',
+export function createDeployOptions(siteLinks: Pick<WebsiteLinks, 'cloudflare' | 'docker'> = links): DeployOption[] {
+  return [
+    {
+      key: 'docker',
+      icon: Container,
+      title: { zh: 'Docker 单容器', en: 'Single Docker container' },
+      body: {
+        zh: '适合 VPS、NAS 和 homelab，数据持久化到本机目录。',
+        en: 'Best for VPS, NAS, and homelab installs with local persistent data.',
+      },
+      href: siteLinks.docker,
+      action: { zh: '看 Docker 部署', en: 'Read Docker setup' },
     },
-    href: links.docker,
-    action: { zh: '看 Docker 部署', en: 'Read Docker setup' },
-  },
-  {
-    key: 'cloudflare',
-    icon: Cloud,
-    title: { zh: 'Cloudflare Workers', en: 'Cloudflare Workers' },
-    body: {
-      zh: '一键部署到 Cloudflare，升级按文档同步生成仓库。',
-      en: 'One-click deploy to Cloudflare; update by syncing the generated repo.',
+    {
+      key: 'cloudflare',
+      icon: Cloud,
+      title: { zh: 'Cloudflare Workers', en: 'Cloudflare Workers' },
+      body: {
+        zh: '一键部署到 Cloudflare，升级按文档同步生成仓库。',
+        en: 'One-click deploy to Cloudflare; update by syncing the generated repo.',
+      },
+      href: siteLinks.cloudflare,
+      action: { zh: '查看 Cloudflare 部署', en: 'Read Cloudflare deploy' },
     },
-    href: links.cloudflare,
-    action: { zh: '查看 Cloudflare 部署', en: 'Read Cloudflare deploy' },
-  },
-]
+  ]
+}
+
+export const deployOptions: DeployOption[] = createDeployOptions()
 
 export function text(value: LocalizedText, locale: Locale) {
   return value[locale]

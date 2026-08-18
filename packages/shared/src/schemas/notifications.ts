@@ -9,7 +9,9 @@ import {
   type DateOnly,
   type LocalTime,
 } from "../runtime";
+import { apiSuccessResponseSchema } from "./api";
 import { okResponseSchema } from "./common";
+import { moneyStringSchema } from "../money";
 import { settingsUpdateBodySchema } from "./settings";
 import { upstreamErrorDetailsSchema } from "./upstream";
 
@@ -36,11 +38,17 @@ export const localScheduleOccurrenceResponseSchema = z.object({
   scheduledInstantUtc: z.string().min(1),
 }).strict();
 
+const notificationCostSharingPayloadResponseSchema = z.object({
+  memberName: z.string().trim().min(1).max(80),
+  amount: moneyStringSchema,
+  currency: z.string().trim().regex(/^[A-Z]{3}$/),
+}).strict();
+
 export const notificationContentItemResponseSchema = z.object({
-  type: z.enum(["renewal", "trial", "expired", "expiry"]),
+  type: z.enum(["renewal", "trial", "expired", "expiry", "costSharing"]),
   subscriptionId: z.string(),
   name: z.string(),
-  price: z.number(),
+  price: moneyStringSchema,
   currency: z.string(),
   status: z.enum(SUBSCRIPTION_STATUSES),
   targetDate: dateOnlyResponseSchema,
@@ -50,7 +58,24 @@ export const notificationContentItemResponseSchema = z.object({
     interval: z.enum(REPEAT_REMINDER_INTERVALS),
     window: z.enum(REPEAT_REMINDER_WINDOWS),
   }).strict().optional(),
-}).strict();
+  // costSharing item 逐成员保存应收信息；后端不做汇率猜测，只写入订阅币种或成员配置币种。
+  costSharing: notificationCostSharingPayloadResponseSchema.optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.type === "costSharing" && !value.costSharing) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["costSharing"],
+      message: "Cost sharing payload is required",
+    });
+  }
+  if (value.type !== "costSharing" && value.costSharing) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["costSharing"],
+      message: "Cost sharing payload is only allowed for cost sharing items",
+    });
+  }
+});
 
 export const upcomingNotificationBatchResponseSchema = localScheduleOccurrenceResponseSchema.extend({
   items: z.array(notificationContentItemResponseSchema),
@@ -118,7 +143,7 @@ export const notificationHistoryJobResponseSchema = z.object({
   updatedAt: z.string(),
 }).strict();
 
-export const notificationHistoryResponseSchema = z.object({
+export const notificationHistoryPayloadSchema = z.object({
   summary: z.object({
     nextCheck: localScheduleOccurrenceResponseSchema,
     nextContentBatch: upcomingNotificationBatchResponseSchema.nullable(),
@@ -137,25 +162,25 @@ export const notificationHistoryResponseSchema = z.object({
     hasMore: z.boolean(),
   }).strict(),
 }).strict();
+export const notificationHistoryResponseSchema = apiSuccessResponseSchema(notificationHistoryPayloadSchema);
 
 export const notificationsTestResponseSchema = okResponseSchema;
-export const notificationRunSkippedResponseSchema = z.object({
-  ok: z.literal(true),
+export const notificationRunSkippedPayloadSchema = z.object({
   sent: z.literal(false),
   reason: z.literal("no_due_items"),
 }).strict();
-export const notificationRunSentResponseSchema = z.object({
-  ok: z.literal(true),
+export const notificationRunSentPayloadSchema = z.object({
   sent: z.literal(true),
   summary: jobChannelsResponseSchema,
 }).strict();
-export const notificationRunResponseSchema = z.discriminatedUnion("sent", [
-  notificationRunSkippedResponseSchema,
-  notificationRunSentResponseSchema,
+export const notificationRunPayloadSchema = z.discriminatedUnion("sent", [
+  notificationRunSkippedPayloadSchema,
+  notificationRunSentPayloadSchema,
 ]);
+export const notificationRunResponseSchema = apiSuccessResponseSchema(notificationRunPayloadSchema);
 
 export type NotificationHistoryStatusFilter = z.infer<typeof notificationHistoryStatusSchema>;
 export type NotificationHistoryJob = z.infer<typeof notificationHistoryJobResponseSchema>;
 export type UpcomingNotificationBatch = z.infer<typeof upcomingNotificationBatchResponseSchema>;
-export type NotificationHistoryResponse = z.infer<typeof notificationHistoryResponseSchema>;
+export type NotificationHistoryResponse = z.infer<typeof notificationHistoryPayloadSchema>;
 export type NotificationJobResult = z.infer<typeof notificationJobResultResponseSchema>;

@@ -1,7 +1,7 @@
 # Renewlet
 
 <p align="center">
-  <img src="./packages/client/public/logo.svg" alt="Renewlet" width="320">
+  <img src="./apps/web/public/logo.svg" alt="Renewlet" width="320">
 </p>
 
 <p align="center">
@@ -25,7 +25,7 @@ It records renewal dates, prices, currencies, categories, payment methods, logos
 
 ## Demo
 
-Try the live demo: <https://renewlet-demo.olyq.org/>
+Try the live demo: <https://demo.renewlet.cc/>
 
 Sign in with `demo@renewlet.local` / `renewlet-demo`. The demo resets regularly, so please do not put real personal data or credentials there.
 
@@ -37,12 +37,14 @@ Sign in with `demo@renewlet.local` / `renewlet-demo`. The demo resets regularly,
 
 - Subscription records with billing cycles, statuses, tags, websites, notes, logos, categories, and payment methods.
 - Reminder jobs based on each user's IANA time zone, local notification time, reminder days, repeat reminders, delivery history, and failed-send retries.
-- Notifications through Telegram, Notifyx, Webhook, WeCom Bot, SMTP email, Bark, and ServerChan.
+- Notifications through Telegram, Notifyx, Webhook, WeCom Bot, DingTalk Bot, SMTP email, Bark, ServerChan, Discord, and PushPlus.
+- Account security with authenticator codes, one-time recovery codes, and passkey sign-in; access security with optional Cloudflare Turnstile human verification for login.
 - Monthly and yearly cost normalization, budget usage, category charts, payment-method charts, and inactive-subscription savings.
 - AI recognition for bill screenshots, notes, CSV/TSV, and pasted table text; drafts are reviewed before import.
 - Global private ICS feed and per-subscription calendar feeds.
 - Public subscription status pages with per-subscription visibility and optional price display.
-- Import and export for Renewlet data, old Renewlet `subscriptions.json`, and Wallos files.
+- Read-only [Public API](docs/public-api.md) with an OpenAPI 3.1 document for CLI tools, Shortcuts, and automation.
+- Import and export Renewlet data, plus Wallos file imports.
 - Uploaded logos, image URLs, built-in icon sources, and favicon fallback suggestions.
 - Docker deployment with React, Go/PocketBase, SQLite, and static assets in one container.
 - Cloudflare Workers deployment with React static assets, Worker API, D1, R2, and Cron Triggers.
@@ -69,7 +71,7 @@ The deploy script creates `docker-compose.yml`, `.env`, and `data/`, then writes
 For production, pin a stable image tag:
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.1.8"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.0"#' .env
 docker compose pull
 docker compose up -d
 ```
@@ -77,7 +79,7 @@ docker compose up -d
 If Docker Hub is unavailable, use GHCR:
 
 ```env
-RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.1.8"
+RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.3.0"
 ```
 
 ## Cloudflare Workers
@@ -86,7 +88,15 @@ RENEWLET_IMAGE="ghcr.io/zhiyingzzhou/renewlet:0.1.8"
 
 Use the deploy button for a Cloudflare-managed repository, or follow [Cloudflare Workers deploy](docs/cloudflare-workers-deploy.md) to manage D1, R2, GitHub Actions, and secrets yourself.
 
-Do not click the deploy button again to upgrade. One-click deploy users run `Sync Renewlet Upstream` in the generated repository connected by Cloudflare Builds; manual deploy users update their fork to the latest Renewlet version, then run `Cloudflare Worker`. Cloudflare updates must apply D1 migrations before publishing the Worker.
+Do not click the deploy button again to upgrade. One-click deploy users run `Sync Renewlet Upstream` in the generated repository connected by Cloudflare Builds; manual deploy users update their fork to the latest Renewlet version, then run `Cloudflare Worker`.
+
+## Login human verification
+
+Admins can enable Turnstile human verification in **Settings -> Access security -> Cloudflare Turnstile**. It protects email password login before password verification, and does not change passkey sign-in, the MFA second step, or first-time setup.
+
+Turnstile is a site-level security setting. Renewlet only exposes the public Site key to the login page; the Secret key stays on the server for Cloudflare Siteverify and is not included in public status, exports, cloud backups, or logs. Docker and Cloudflare deployments already include the required CSP entries for `https://challenges.cloudflare.com`.
+
+For manual validation, use Cloudflare's official Turnstile testing Site key and Secret key instead of a real challenge.
 
 ## Upgrade
 
@@ -96,12 +106,10 @@ Back up data and config before upgrading:
 tar -czf renewlet-backup-$(date +%F).tgz .env docker-compose.yml data
 ```
 
-If you deployed Renewlet before 2026-06-04, open the old version before upgrading and export `subscriptions.json` from Export subscriptions. After upgrading, import it from Import data. This file is only for subscription migration; keep the backup above as well.
-
 Upgrade with Docker Compose:
 
 ```bash
-sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.1.8"#' .env
+sed -i.bak 's#RENEWLET_IMAGE=.*#RENEWLET_IMAGE="zhiyingzzhou/renewlet:0.3.0"#' .env
 docker compose pull
 docker compose up -d
 docker compose logs -f
@@ -127,10 +135,29 @@ Common `.env` values:
 | `PB_ENCRYPTION_KEY` | Encryption key for sensitive PocketBase settings. Do not rotate it casually after deployment. |
 | `CRON_SECRET` | Bearer secret for external Cron calls to `/api/cron/notifications`. |
 | `RENEWLET_DEMO_MODE` | Docker Demo Mode switch, `false` by default. |
-| `RENEWLET_CUSTOM_HEAD_SCRIPT` | Optional deployer-provided external `<script>` injection. Empty by default; leave unset to inject no external script. |
+| `RENEWLET_CUSTOM_HEAD_SCRIPT` | Optional deployer-provided external `<script>` injection. Empty by default; only use trusted self-hosted HTTPS scripts because they run inside the Renewlet page. |
 | `NOTIFICATION_SCHEDULER_ENABLED` | Built-in notification scheduler switch, `true` by default. |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Optional Docker/Go upstream HTTP proxy; lowercase variable names are also supported. |
 
 The full Docker environment template is in `.env.example`.
+
+### Docker Upstream Proxy
+
+If your deployment needs a proxy for Telegram, AI providers, GitHub Release checks, built-in icon indexes, WebDAV, or S3-compatible storage, set the standard proxy variables in `.env`:
+
+```env
+HTTP_PROXY="http://host.docker.internal:7890"
+HTTPS_PROXY="http://host.docker.internal:7890"
+NO_PROXY="localhost,127.0.0.1,.local"
+```
+
+These variables affect Docker/Go server-side HTTP(S) upstream requests only. They do not affect SMTP, browser-loaded images, or Cloudflare Worker deployments. Inside the container, `127.0.0.1` / `localhost` points to the container itself; if the proxy runs on the host, use an address reachable from the container and recreate the container after changing `.env`:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+Go also supports the lowercase variable names `http_proxy`, `https_proxy`, and `no_proxy`.
 
 ### Custom Head Script
 
@@ -141,6 +168,8 @@ RENEWLET_CUSTOM_HEAD_SCRIPT='<script defer src="https://cdn.example.com/widget.j
 ```
 
 Renewlet accepts only a single external script tag with `src` and no inline content. The script origin is automatically added to `script-src` and `connect-src`; when `data-host-url` is present, its origin is also added to `connect-src`.
+
+Treat this as a high-trust deployment boundary. The injected script runs in the same browser page as Renewlet. It cannot read the HttpOnly session cookie, but same-origin script can still read the CSRF cookie and send credentialed requests as the current browser session. Prefer a self-hosted HTTPS script that you fully control, and leave `RENEWLET_CUSTOM_HEAD_SCRIPT` empty if you do not need it.
 
 Docker/Go deployments inject this at runtime, so changing the environment variable only requires restarting Renewlet. Cloudflare Static Assets reads the variable at build time, so changes require rebuilding and redeploying.
 
@@ -197,10 +226,6 @@ Docker/Go deployments inject this at runtime, so changing the environment variab
 ## Contributing
 
 Issues, documentation fixes, tests, and pull requests are welcome. For larger changes, open an issue first with the goal, use case, and rough approach.
-
-## Acknowledgements
-
-- [LINUX DO](https://linux.do/): Renewlet thanks the LINUX DO community for open-source project discussion.
 
 ## License
 

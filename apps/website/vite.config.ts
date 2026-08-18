@@ -10,16 +10,18 @@ import {
   renderSitemapXml,
   replaceWebsiteMetadataPlaceholders,
   resolveWebsiteDeployment,
-} from './src/lib/website-metadata'
+} from './src/lib/website-metadata.ts'
+import { latestStableReleaseVersion } from './scripts/release-version.ts'
 
 const rootDir = fileURLToPath(new URL('.', import.meta.url))
 const deployment = resolveWebsiteDeployment(process.env)
+const websiteSoftwareVersion = latestStableReleaseVersion()
 
 function websiteMetadataPlugin(): Plugin {
   return {
     name: 'renewlet-website-metadata',
     transformIndexHtml(html) {
-      return replaceWebsiteMetadataPlaceholders(html, deployment)
+      return replaceWebsiteMetadataPlaceholders(html, deployment, { softwareVersion: websiteSoftwareVersion })
     },
     generateBundle() {
       // GitHub Pages 当前发布 URL 是官网路径事实来源；不要再把仓库名或自定义域写进静态文件。
@@ -31,6 +33,9 @@ function websiteMetadataPlugin(): Plugin {
 
 export default defineConfig({
   base: deployment.viteBase,
+  define: {
+    __RENEWLET_WEBSITE_REPOSITORY_LINKS__: JSON.stringify(deployment.repositoryLinks),
+  },
   build: {
     rollupOptions: {
       // 中文根路径与英文 /en/ 都是可索引 HTML 入口；不要退回只靠前端按钮切语言。

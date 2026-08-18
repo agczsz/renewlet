@@ -30,6 +30,9 @@ const e2eClientPort = 45173;
 const e2eServerURL = `http://127.0.0.1:${e2eServerPort}`;
 const e2eClientURL = `http://127.0.0.1:${e2eClientPort}`;
 const adminStorageState = "e2e/.auth/admin.json";
+const browserExecutablePath = env.RENEWLET_E2E_BROWSER_EXECUTABLE?.trim();
+// s可能遇到 Playwright CDN/TLS 被代理拦截；只在显式传入时用系统浏览器，CI 仍使用 hermetic 浏览器。
+const localBrowserFallback = browserExecutablePath ? { launchOptions: { executablePath: browserExecutablePath } } : {};
 
 // 端口必须保持拆分：43190 只给 PocketBase/Go API，浏览器页面只从 45173 的 Vite 入口进入。
 // 如果把 baseURL 指到后端端口，headed 调试会看到 PocketBase UI 而不是 Renewlet 前端。
@@ -50,13 +53,14 @@ export default defineConfig({
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
     video: "retain-on-failure",
+    ...localBrowserFallback,
   },
   webServer: [
     {
       // 每次清空 e2e 数据目录，让 setup project 拥有唯一的初始化状态；不复用旧 server
       // 可以避免 storage state 与 PocketBase SQLite 数据跨测试轮次串味。
       command: `rm -rf ./pb_data_e2e && go run ./cmd/renewlet serve --http=127.0.0.1:${e2eServerPort} --dir=./pb_data_e2e`,
-      cwd: "./packages/server",
+      cwd: "./apps/docker-server",
       env: {
         ...proxyEnv,
         SETUP_ENABLED: "true",
@@ -67,7 +71,7 @@ export default defineConfig({
       timeout: 120_000,
     },
     {
-      command: `pnpm --dir packages/client exec vite --host 127.0.0.1 --port ${e2eClientPort} --strictPort`,
+      command: `pnpm --dir apps/web exec vite --host 127.0.0.1 --port ${e2eClientPort} --strictPort`,
       env: {
         ...proxyEnv,
         VITE_DEV_PROXY_TARGET: e2eServerURL,
@@ -89,7 +93,7 @@ export default defineConfig({
     {
       name: "desktop",
       dependencies: ["setup"],
-      testMatch: ["**/subscriptions.spec.ts", "**/settings.spec.ts", "**/statistics.spec.ts"],
+      testMatch: ["**/subscriptions.spec.ts", "**/settings.spec.ts", "**/statistics.spec.ts", "**/release-smoke.spec.ts"],
       use: {
         ...devices["Desktop Chrome"],
         storageState: adminStorageState,

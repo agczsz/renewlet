@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { authenticatorMfaMethodSchema } from "./auth";
 import { okResponseSchema } from "./common";
+import { apiSuccessResponseSchema } from "./api";
 
 /**
  * 管理员角色枚举。
@@ -19,21 +21,72 @@ export const adminUserSchema = z.object({
   email: z.string(),
   role: userRoleSchema,
   banned: z.boolean(),
+  // 管理员列表只暴露可用二因素方法和数量，不返回任何 credential、challenge 或恢复码 hash。
+  mfaEnabled: z.boolean(),
+  mfaMethods: z.array(authenticatorMfaMethodSchema),
+  passkeysEnabled: z.boolean(),
+  passkeyCount: z.number().int().min(0),
   banReason: z.string().nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 }).strict();
 
-export const adminUsersResponseSchema = z.object({
+export const adminUsersPayloadSchema = z.object({
   users: z.array(adminUserSchema),
 }).strict();
+export const adminUsersResponseSchema = apiSuccessResponseSchema(adminUsersPayloadSchema);
 
-export const adminUserResponseSchema = z.object({
+export const adminUserPayloadSchema = z.object({
   user: adminUserSchema,
 }).strict();
+export const adminUserResponseSchema = apiSuccessResponseSchema(adminUserPayloadSchema);
 
 export const adminPatchUserResponseSchema = okResponseSchema;
 export const adminDeleteUserResponseSchema = okResponseSchema;
+export const adminResetUserMfaResponseSchema = okResponseSchema;
+export const adminResetUserPasskeysResponseSchema = okResponseSchema;
+
+// 管理端访问安全契约只返回脱敏状态；secret 明文只允许通过 update body 单向写入服务端。
+export const authSecurityTurnstileSettingsSchema = z.object({
+  enabled: z.boolean(),
+  siteKey: z.string(),
+  // 管理端只知道 secret 是否已配置；密钥明文只能随本次 PUT 入站，不能被任何 API 回显。
+  secretConfigured: z.boolean(),
+}).strict();
+
+export const authSecuritySettingsPayloadSchema = z.object({
+  turnstile: authSecurityTurnstileSettingsSchema,
+}).strict();
+export const authSecuritySettingsResponseSchema = apiSuccessResponseSchema(authSecuritySettingsPayloadSchema);
+
+// 该 wire-shape 必须与 Go DTO、Worker handler 和设置页 controller 同步：secret 省略=保留，空字符串=清空。
+export const authSecurityTurnstileUpdateSchema = z.object({
+  enabled: z.boolean(),
+  siteKey: z.string().trim().max(256),
+  // undefined 表示保留旧 secret，空字符串表示清空；服务端会在启用时重新检查完整性。
+  secret: z.string().max(4096).optional(),
+}).strict();
+
+export const authSecuritySettingsUpdateBodySchema = z.object({
+  turnstile: authSecurityTurnstileUpdateSchema,
+}).strict();
+
+// 配置页测试会消耗一次 Turnstile token；secret 非空=测试草稿，空/省略=后端回退已保存值，响应不能回显凭据。
+export const authSecurityTurnstileTestSchema = z.object({
+  siteKey: z.string().trim().max(256),
+  secret: z.string().max(4096).optional(),
+  // token 缺失要保留为稳定业务错误码 TURNSTILE_REQUIRED，schema 只负责拒绝未知字段和超长输入。
+  turnstileToken: z.string().trim().max(2048).optional().default(""),
+}).strict();
+
+export const authSecurityTurnstileTestBodySchema = z.object({
+  turnstile: authSecurityTurnstileTestSchema,
+}).strict();
+
+export const authSecurityTurnstileTestPayloadSchema = z.object({
+  verified: z.literal(true),
+}).strict();
+export const authSecurityTurnstileTestResponseSchema = apiSuccessResponseSchema(authSecurityTurnstileTestPayloadSchema);
 
 /**
  * 管理员创建用户请求契约。
@@ -61,4 +114,8 @@ export const adminPatchUserBodySchema = z.object({
 
 export type UserRole = z.infer<typeof userRoleSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
-export type AdminUsersResponse = z.infer<typeof adminUsersResponseSchema>;
+export type AdminUsersResponse = z.infer<typeof adminUsersPayloadSchema>;
+export type AuthSecuritySettings = z.infer<typeof authSecuritySettingsPayloadSchema>;
+export type AuthSecuritySettingsUpdateBody = z.infer<typeof authSecuritySettingsUpdateBodySchema>;
+export type AuthSecurityTurnstileTestBody = z.infer<typeof authSecurityTurnstileTestBodySchema>;
+export type AuthSecurityTurnstileTestResponse = z.infer<typeof authSecurityTurnstileTestPayloadSchema>;

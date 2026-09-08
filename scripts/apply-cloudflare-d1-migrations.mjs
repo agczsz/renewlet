@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 /**
- * Cloudflare D1 remote migration runner.
+ * Cloudflare D1 migration runner.
  *
- * 触发时机：`pnpm deploy`、自管 Cloudflare workflow 和稳定版生产部署。
- * 前置依赖：Wrangler 已登录或 CI 已注入 Cloudflare API token/account。
- * 副作用：对远端 D1 应用尚未执行的 migration；非重试错误必须继续阻断部署。
+ * 触发时机：本地 Worker 启动、`pnpm deploy`、自管 Cloudflare workflow 和稳定版生产部署。
+ * 前置依赖：显式选择 local/remote；remote 需要 Wrangler 登录或 Cloudflare API token/account。
+ * 状态流：迁移守卫 -> Feed 持久保护 -> migration -> Feed 恢复 -> v3 派生回填 -> 外键校验。
+ * 任一步失败都必须阻断 Worker 更新；各持久阶段可由下一次部署从数据库状态安全重放。
  */
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { checkCloudflareMigrationSafety } from "./check-cloudflare-migration-safety.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -25,18 +27,19 @@ const retryablePatterns = [
 
 function usage() {
   return [
-    "Usage: node scripts/apply-cloudflare-d1-migrations.mjs [--config <path>]",
+    "Usage: node scripts/apply-cloudflare-d1-migrations.mjs (--local | --remote) [--config <path>]",
     "",
-    "Applies remote D1 migrations through Wrangler and retries Cloudflare/D1 transient failures.",
+    "Protects calendar Feeds, applies D1 migrations, backfills derived state, and verifies foreign keys.",
   ].join("\n");
 }
 
 function parseArgs(argv) {
-  const options = { configPath: undefined };
+  const options = { configPath: undefined, target: undefined };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
-    if (arg === "--" && index === 0) {
-      // pnpm 会把脚本名后的参数原样转发；只兼容旧 workflow 的前导分隔符，其它未知参数仍必须失败。
+    if (arg === "--local" || arg === "--remote") {
+      if (options.target) throw new Error(`Specify exactly one D1 target.\n${usage()}`);
+      options.target = arg.slice(2);
       continue;
     }
     if (arg === "--help" || arg === "-h") {
@@ -52,6 +55,7 @@ function parseArgs(argv) {
     }
     throw new Error(`Unknown argument: ${arg}\n${usage()}`);
   }
+  if (!options.target) throw new Error(`A D1 target is required.\n${usage()}`);
   return options;
 }
 
@@ -72,7 +76,25 @@ function readPositiveIntEnv(name, fallback) {
 }
 
 function wranglerArgs(options) {
-  const args = ["exec", "wrangler", "d1", "migrations", "apply", "DB", "--remote"];
+  const args = ["exec", "wrangler", "d1", "migrations", "apply", "DB", `--${options.target}`];
+  if (options.configPath) args.push("--config", options.configPath);
+  return args;
+}
+
+function derivedBackfillArgs(options) {
+  const args = ["exec", "tsx", "scripts/backfill-cloudflare-subscription-derived-state.ts", `--${options.target}`];
+  if (options.configPath) args.push("--config", options.configPath);
+  return args;
+}
+
+function calendarFeedProtectionArgs(options, phase) {
+  const args = ["exec", "tsx", "scripts/protect-cloudflare-calendar-feeds.ts", `--${options.target}`, "--phase", phase];
+  if (options.configPath) args.push("--config", options.configPath);
+  return args;
+}
+
+function foreignKeyCheckArgs(options) {
+  const args = ["exec", "wrangler", "d1", "execute", "DB", `--${options.target}`, "--command", "PRAGMA foreign_key_check", "--json"];
   if (options.configPath) args.push("--config", options.configPath);
   return args;
 }
@@ -131,16 +153,58 @@ function exitCode(result) {
   return typeof result.status === "number" && result.status !== null ? result.status : 1;
 }
 
+function assertForeignKeyCheck(result) {
+  if (result.status !== 0) throw new Error("Cloudflare D1 foreign key check command failed.");
+  let payload;
+  try {
+    payload = JSON.parse(result.stdout);
+  } catch {
+    throw new Error("Cloudflare D1 foreign key check returned invalid Wrangler JSON.");
+  }
+  const results = Array.isArray(payload) ? payload : [payload];
+  if (results.length === 0 || results.some((item) => item?.success !== true || !Array.isArray(item.results))) {
+    throw new Error("Cloudflare D1 foreign key check returned an unsuccessful Wrangler result.");
+  }
+  if (results.some((item) => item.results.length > 0)) {
+    throw new Error("Cloudflare D1 foreign key check found violations.");
+  }
+}
+
+async function runPostMigrationSteps(options) {
+  // Feed 是不可推导事实，必须先恢复并校验；其后的集合与调度状态都能从 subscriptions 重建。
+  const restoreFeeds = await runWranglerMigration(calendarFeedProtectionArgs(options, "restore"));
+  if (restoreFeeds.status !== 0) throw new Error("Cloudflare D1 calendar Feed restore failed.");
+  const backfill = await runWranglerMigration(derivedBackfillArgs(options));
+  if (backfill.status !== 0) throw new Error("Cloudflare D1 derived-state backfill failed.");
+  const foreignKeys = await runWranglerMigration(foreignKeyCheckArgs(options));
+  assertForeignKeyCheck(foreignKeys);
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  // 守卫必须先于 Feed prepare 的首个远端写入，避免 CI 路径绕过 check:deploy 后污染 D1。
+  checkCloudflareMigrationSafety(repoRoot);
+  const prepareFeeds = await runWranglerMigration(calendarFeedProtectionArgs(options, "prepare"));
+  if (prepareFeeds.status !== 0) throw new Error("Cloudflare D1 calendar Feed backup failed.");
+  const args = wranglerArgs(options);
+  if (options.target === "local") {
+    const result = await runWranglerMigration(args);
+    if (result.status !== 0) {
+      console.error("Local D1 migrations failed.");
+      process.exit(exitCode(result));
+    }
+    await runPostMigrationSteps(options);
+    return;
+  }
   const maxAttempts = readPositiveIntEnv("RENEWLET_D1_MIGRATION_MAX_ATTEMPTS", 5);
   const baseDelayMs = readNonNegativeIntEnv("RENEWLET_D1_MIGRATION_RETRY_BASE_MS", 1000);
   const maxDelayMs = readNonNegativeIntEnv("RENEWLET_D1_MIGRATION_RETRY_MAX_MS", 15000);
-  const args = wranglerArgs(options);
-
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const result = await runWranglerMigration(args);
-    if (result.status === 0) return;
+    if (result.status === 0) {
+      await runPostMigrationSteps(options);
+      return;
+    }
 
     const output = commandOutput(result);
     const retryable = isRetryableD1MigrationFailure(output);

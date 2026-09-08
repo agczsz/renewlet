@@ -1,6 +1,13 @@
 /** shared runtime 常量是 Go DTO、Cloudflare Worker 和前端 schema 的共同枚举边界。 */
-export const SUPPORTED_LOCALES = ["zh-CN", "en-US"] as const;
-export type Locale = (typeof SUPPORTED_LOCALES)[number];
+export {
+  DEFAULT_LOCALE_PREFERENCE,
+  FALLBACK_LOCALE,
+  LOCALE_PREFERENCES,
+  SOURCE_LOCALE,
+  SUPPORTED_LOCALES,
+  type Locale,
+  type LocalePreference,
+} from "./i18n-config";
 
 export const THEME_MODES = ["light", "dark", "system"] as const;
 export type ThemeMode = (typeof THEME_MODES)[number];
@@ -16,7 +23,7 @@ export type SubscriptionStatus = (typeof SUBSCRIPTION_STATUSES)[number];
 export const BILLING_CYCLES = ["weekly", "monthly", "quarterly", "semi-annual", "annual", "custom", "one-time"] as const;
 export type BillingCycle = (typeof BILLING_CYCLES)[number];
 
-/** 自定义扣费周期单位是跨 Go/PocketBase、D1 和前端日期算法的共同契约；旧 custom 数据缺省按 day 读取。 */
+/** 自定义扣费周期单位是跨 Go/PocketBase、D1 和前端日期算法的共同契约；产品 API 不允许缺省。 */
 export const CUSTOM_CYCLE_UNITS = ["day", "week", "month", "year"] as const;
 export type CustomCycleUnit = (typeof CUSTOM_CYCLE_UNITS)[number];
 

@@ -6,10 +6,11 @@ import type { CustomCycleUnit } from "@renewlet/shared/runtime";
 /**
  * Env 的 binding 字段来自 `wrangler types --env-file /dev/null` 生成结果；这里仅补 CI 注入的可选构建元信息。
  *
- * `SETUP_ENABLED` 在 wrangler.jsonc 中有默认值，但测试和生成配置可能显式省略，运行时仍按关闭外的字符串判断。
+ * `SETUP_ENABLED` 与维护开关在 wrangler.jsonc 中有默认值，但测试和生成配置可能显式省略。
  */
-export type Env = Omit<Cloudflare.Env, "SETUP_ENABLED" | "MEDIA_ICON_INDEX_REFRESH_QUEUE"> & {
+export type Env = Omit<Cloudflare.Env, "SETUP_ENABLED" | "RENEWLET_MAINTENANCE_MODE" | "MEDIA_ICON_INDEX_REFRESH_QUEUE"> & {
   SETUP_ENABLED?: string;
+  RENEWLET_MAINTENANCE_MODE?: string;
   SESSION_TTL_DAYS?: string;
   RENEWLET_VERSION?: string;
   RENEWLET_COMMIT?: string;
@@ -189,6 +190,33 @@ export interface SubscriptionRow {
   updated_at: string;
 }
 
+/** 私有集合查询只读取轻量 DTO 所需列，详情字段不会进入列表、统计或日历的 D1 结果集。 */
+export type SubscriptionCollectionRow = Pick<SubscriptionRow,
+  | "id"
+  | "name"
+  | "logo"
+  | "price"
+  | "currency"
+  | "billing_cycle"
+  | "custom_days"
+  | "custom_cycle_unit"
+  | "one_time_term_count"
+  | "one_time_term_unit"
+  | "category"
+  | "status"
+  | "pinned"
+  | "public_hidden"
+  | "payment_method"
+  | "start_date"
+  | "next_billing_date"
+  | "auto_renew"
+  | "auto_calculate_next_billing_date"
+  | "trial_end_date"
+  | "reminder_days"
+  | "cost_sharing_json"
+  | "created_at"
+>;
+
 /** 每用户调度 gate；Cron 先读这里，空状态下不再触碰 subscriptions 候选查询。 */
 export interface SubscriptionSchedulerStateRow {
   user_id: string;
@@ -231,8 +259,11 @@ export interface SubscriptionListIndexRow {
 export interface SubscriptionUserStatsRow {
   user_id: string;
   total_count: number;
-  status_counts_json: string;
-  source_updated_at: string | null;
+  trial_count: number;
+  active_count: number;
+  expired_count: number;
+  paused_count: number;
+  cancelled_count: number;
   created_at: string;
   updated_at: string;
 }

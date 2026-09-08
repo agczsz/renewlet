@@ -4,91 +4,98 @@
  * 架构位置：
  * - 持有用户当前筛选条件。
  * - 调用 domain 纯函数得到标签集合和筛选结果。
- *
- * PERF： 订阅量很大时，可把搜索字段预先标准化成索引，避免每次输入都遍历原始字符串。
  */
 import { useCallback, useDeferredValue, useMemo, useState } from "react";
 import { DEFAULT_LOCALE, type Locale } from "@/i18n/locales";
-import { todayDateOnlyInTimeZone } from "@/lib/time/date-only";
-import type { Category, Subscription, SubscriptionStatus } from "@/types/subscription";
+import { todayDateOnlyInTimeZone, type DateOnly } from "@/lib/time/date-only";
+import type { Category, Subscription, SubscriptionCollectionItem, SubscriptionStatus } from "@/types/subscription";
 import { moneyToNumber } from "@renewlet/shared/money";
 import {
-  collectSubscriptionTags,
   DEFAULT_SUBSCRIPTION_ADVANCED_FILTERS,
   buildSubscriptionListFilters,
-  filterSubscriptions,
+  filterSubscriptionsByListFilters,
   hasActiveSubscriptionAdvancedFilters,
-  hasActiveSubscriptionControls,
   hasActiveSubscriptionFilters,
   sortSubscriptions,
   type SubscriptionAdvancedFilterState,
   type SubscriptionSortOption,
   type SubscriptionFilterState,
-  type SubscriptionRenewalFilter,
+  type SubscriptionPaymentTypeFilter,
 } from "../domain/subscription-filters";
 
 interface UseSubscriptionFiltersOptions {
   defaultCurrency?: string;
   convert?: (amount: number | string, from: string, to: string) => number;
   locale?: Locale;
-  timeZone?: string;
+  today?: DateOnly | string;
+  availableTags?: readonly string[] | undefined;
 }
 
 const IDENTITY_CONVERT = (amount: number | string) => moneyToNumber(amount);
 
 /** 管理订阅列表筛选状态，并返回筛选后的结果。 */
 export function useSubscriptionFilters(
-  subscriptions: readonly Subscription[],
+  subscriptions: readonly SubscriptionCollectionItem[],
   {
     defaultCurrency = "CNY",
     convert = IDENTITY_CONVERT,
     locale = DEFAULT_LOCALE,
-    timeZone = "UTC",
+    today = todayDateOnlyInTimeZone(new Date(), "UTC"),
+    availableTags = [],
   }: UseSubscriptionFiltersOptions = {},
 ) {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategories, setSelectedCategories] = useState<Category[]>([]);
   const [statusFilter, setStatusFilter] = useState<SubscriptionStatus | "all">("all");
-  const [renewalFilter, setRenewalFilter] = useState<SubscriptionRenewalFilter>("all");
+  const [paymentTypeFilter, setPaymentTypeFilter] = useState<SubscriptionPaymentTypeFilter>("all");
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [advancedFilters, setAdvancedFilters] = useState<SubscriptionAdvancedFilterState>(DEFAULT_SUBSCRIPTION_ADVANCED_FILTERS);
   const [sortOption, setSortOption] = useState<SubscriptionSortOption>("default");
   const deferredSearchQuery = useDeferredValue(searchQuery);
 
   const filters: SubscriptionFilterState = useMemo(
-    () => ({ searchQuery: deferredSearchQuery, selectedCategories, statusFilter, renewalFilter, selectedTags }),
-    [deferredSearchQuery, renewalFilter, selectedCategories, selectedTags, statusFilter],
+    () => ({ searchQuery: deferredSearchQuery, selectedCategories, statusFilter, paymentTypeFilter, selectedTags }),
+    [deferredSearchQuery, paymentTypeFilter, selectedCategories, selectedTags, statusFilter],
   );
   const activeControlFilters: SubscriptionFilterState = useMemo(
-    () => ({ searchQuery, selectedCategories, statusFilter, renewalFilter, selectedTags }),
-    [renewalFilter, searchQuery, selectedCategories, selectedTags, statusFilter],
+    () => ({ searchQuery, selectedCategories, statusFilter, paymentTypeFilter, selectedTags }),
+    [paymentTypeFilter, searchQuery, selectedCategories, selectedTags, statusFilter],
   );
-  const today = useMemo(() => todayDateOnlyInTimeZone(new Date(), timeZone), [timeZone]);
-  const allTags = useMemo(() => collectSubscriptionTags(subscriptions), [subscriptions]);
   const subscriptionListFilters = useMemo(
     () => buildSubscriptionListFilters(filters, advancedFilters),
     [advancedFilters, filters],
   );
-  const filteredSubscriptions = useMemo(
-    () => filterSubscriptions(subscriptions, filters, { today }),
-    [filters, subscriptions, today],
+  const activeSubscriptionListFilters = useMemo(
+    () => buildSubscriptionListFilters(activeControlFilters, advancedFilters),
+    [activeControlFilters, advancedFilters],
   );
   const sortedSubscriptions = useMemo(
-    () => sortSubscriptions(filteredSubscriptions, { sortOption, defaultCurrency, convert, locale }),
-    [convert, defaultCurrency, filteredSubscriptions, locale, sortOption],
+    () => sortSubscriptions(subscriptions, { sortOption, today, defaultCurrency, convert, locale }),
+    [convert, defaultCurrency, locale, sortOption, subscriptions, today],
   );
   const sortSubscriptionsForDisplay = useCallback(
-    (items: readonly Subscription[]) => sortSubscriptions(items, { sortOption, defaultCurrency, convert, locale }),
-    [convert, defaultCurrency, locale, sortOption],
+    <T extends SubscriptionCollectionItem>(items: readonly T[]) =>
+      sortSubscriptions(items, { sortOption, today, defaultCurrency, convert, locale }),
+    [convert, defaultCurrency, locale, sortOption, today],
   );
-  const filterSubscriptionsForDisplay = useCallback(
-    (items: readonly Subscription[]) => filterSubscriptions(items, filters, { today }),
-    [filters, today],
+  const selectSubscriptionsForExport = useCallback(
+    (items: readonly Subscription[]) =>
+      sortSubscriptions(filterSubscriptionsByListFilters(items, activeSubscriptionListFilters, { today }), {
+        sortOption,
+        today,
+        defaultCurrency,
+        convert,
+        locale,
+      }),
+    [activeSubscriptionListFilters, convert, defaultCurrency, locale, sortOption, today],
   );
   // 搜索输入立即响应，列表筛选延后到 deferred query，避免大列表每个键入帧都重排虚拟行。
   const hasActiveAdvancedFilters = hasActiveSubscriptionAdvancedFilters(advancedFilters);
   const hasActiveFilters = hasActiveSubscriptionFilters(activeControlFilters) || hasActiveAdvancedFilters;
-  const hasActiveControls = hasActiveSubscriptionControls(activeControlFilters, sortOption, advancedFilters);
+  const hasDeferredFilters = hasActiveSubscriptionFilters(filters) || hasActiveAdvancedFilters;
+  const hasCustomSort = sortOption !== "default";
+  // index 的启用条件与 query key 必须来自同一份 deferred filters；否则首个字符会先发无筛选全量请求，再发真实搜索请求。
+  const needsCollectionIndex = hasDeferredFilters || hasCustomSort;
 
   const toggleTag = (tag: string) => {
     setSelectedTags((prev) =>
@@ -108,10 +115,9 @@ export function useSubscriptionFilters(
     setSearchQuery("");
     setSelectedCategories([]);
     setStatusFilter("all");
-    setRenewalFilter("all");
+    setPaymentTypeFilter("all");
     setSelectedTags([]);
     setAdvancedFilters(DEFAULT_SUBSCRIPTION_ADVANCED_FILTERS);
-    setSortOption("default");
   };
 
   return {
@@ -121,22 +127,23 @@ export function useSubscriptionFilters(
     setSelectedCategories,
     statusFilter,
     setStatusFilter,
-    renewalFilter,
-    setRenewalFilter,
+    paymentTypeFilter,
+    setPaymentTypeFilter,
     sortOption,
     setSortOption,
     selectedTags,
     setSelectedTags,
     advancedFilters,
     setAdvancedFilters,
-    allTags,
+    allTags: availableTags,
     filteredSubscriptions: sortedSubscriptions,
-    filterSubscriptionsForDisplay,
     sortSubscriptionsForDisplay,
+    selectSubscriptionsForExport,
     subscriptionListFilters,
     hasActiveFilters,
     hasActiveAdvancedFilters,
-    hasActiveControls,
+    hasCustomSort,
+    needsCollectionIndex,
     toggleCategory,
     clearSelectedCategories,
     toggleTag,

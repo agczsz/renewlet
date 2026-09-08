@@ -249,7 +249,10 @@ func TestDemoModeCreatesRepairsSeedsAndDisablesSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	demoSettings := settingsFromRecord(settingsRecord)
+	demoSettings := mustSettingsFromRecord(t, settingsRecord)
+	if demoSettings.LocalePreference != string(autoLocalePreference) {
+		t.Fatalf("expected demo locale preference auto, got %q", demoSettings.LocalePreference)
+	}
 	if !demoSettings.SubscriptionPriceReferenceEnabled || demoSettings.SubscriptionPriceReferenceCurrency != "CNY" {
 		t.Fatalf("expected demo subscription price reference to default to CNY, got enabled=%v currency=%q", demoSettings.SubscriptionPriceReferenceEnabled, demoSettings.SubscriptionPriceReferenceCurrency)
 	}
@@ -422,16 +425,16 @@ func TestDemoModeAllowsNormalSettingsButProtectsExternalIntegrationSettings(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings := settingsFromRecord(settingsRecord)
+	settings := mustSettingsFromRecord(t, settingsRecord)
 	if settings.ThemeMode != "light" || settings.MonthlyBudget != "123" {
 		t.Fatalf("ordinary settings were not persisted: %#v", settings)
 	}
 
-	protected := serveTestRequest(t, app, http.MethodPut, "/api/app/settings", `{"telegramBotToken":"secret"}`, token)
+	protected := serveTestRequest(t, app, http.MethodPut, "/api/app/settings", `{"secretUpdates":{"telegramBotToken":{"action":"set","value":"secret"}}}`, token)
 	if protected.Code != http.StatusForbidden {
 		t.Fatalf("expected protected settings save to be forbidden, got %d: %s", protected.Code, protected.Body.String())
 	}
-	protectedDiscord := serveTestRequest(t, app, http.MethodPut, "/api/app/settings", `{"discordWebhookUrl":"https://discord.com/api/webhooks/123/secret","pushplusToken":"secret"}`, token)
+	protectedDiscord := serveTestRequest(t, app, http.MethodPut, "/api/app/settings", `{"secretUpdates":{"discordWebhookUrl":{"action":"set","value":"https://discord.com/api/webhooks/123/secret"},"pushplusToken":{"action":"clear"}}}`, token)
 	if protectedDiscord.Code != http.StatusForbidden {
 		t.Fatalf("expected Discord/PushPlus settings save to be forbidden, got %d: %s", protectedDiscord.Code, protectedDiscord.Body.String())
 	}
@@ -439,11 +442,15 @@ func TestDemoModeAllowsNormalSettingsButProtectsExternalIntegrationSettings(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := settingsFromRecord(settingsRecord).TelegramBotToken; got != "" {
+	if got := mustSettingsFromRecord(t, settingsRecord).TelegramBotToken; got != "" {
 		t.Fatalf("protected setting leaked into storage: %q", got)
 	}
+	keep := serveTestRequest(t, app, http.MethodPut, "/api/app/settings", `{"themeVariant":"rose","secretUpdates":{"telegramBotToken":{"action":"keep"},"aiRecognition.apiKey":{"action":"keep"}}}`, token)
+	if keep.Code != http.StatusOK {
+		t.Fatalf("expected keep-only secret mutations to remain ordinary settings updates, got %d: %s", keep.Code, keep.Body.String())
+	}
 
-	recordSettings := settingsFromRecord(settingsRecord)
+	recordSettings := mustSettingsFromRecord(t, settingsRecord)
 	recordSettings.AIRecognition.APIKey = "sk-demo"
 	settingsRecord.Set("settings", recordSettings)
 	if err := app.Save(settingsRecord); err == nil {

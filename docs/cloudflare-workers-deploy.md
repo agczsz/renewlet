@@ -235,6 +235,34 @@ One-click deploy users: follow the Upgrade steps above and run `Sync Renewlet Up
 
 Manual deploy users: update your fork to the latest Renewlet version with `Sync fork` / `Update branch`. If deployment does not start automatically, open `Actions` and run `Cloudflare Worker`.
 
+## D1 Upgrade and Recovery
+
+Before a schema upgrade, create a portable SQL export. `pnpm deploy` captures the current Time Travel bookmark and active Worker version before its first D1 write and records both in the GitHub job summary or local output.
+
+```bash
+pnpm exec wrangler d1 export DB --remote --config wrangler.generated.jsonc --output renewlet-before-upgrade.sql
+```
+
+Normal upgrades stay online. When an unapplied `_exclusive_` migration exists, the deployment orchestrator first deploys the same Worker bundle in maintenance mode, removes Cron and the Queue consumer, and waits Cloudflare's 15-minute maximum background invocation duration. API, ICS, and webhook requests return `503` with `Retry-After: 900` and `Cache-Control: no-store`; Static Assets continue serving the SPA.
+
+```bash
+pnpm deploy -- --config wrangler.generated.jsonc --maintenance-config wrangler.maintenance.generated.jsonc
+```
+
+The orchestrator then protects calendar Feeds, applies migrations, rebuilds derived state, checks foreign keys plus the complete settings data/trigger definitions, deploys the normal configuration, and verifies the active Worker version. If a failure happens before the first D1 write, it restores the previous Worker, Cron, and Queue consumer automatically. After the first D1 write, any failure keeps or redeploys maintenance mode. Rerun the same deploy command after fixing the cause; a completed migration marker is verified and not executed again.
+
+If you decide to roll back the data contract, review all writes since the recorded checkpoint first. Recovery is destructive and must use the single command below. It redeploys maintenance mode, drains background work, restores D1, and only then rolls back the Worker and restores its triggers. Never run Worker rollback by itself after an exclusive migration.
+
+```bash
+pnpm cloudflare:deploy:recover -- --config wrangler.generated.jsonc --maintenance-config wrangler.maintenance.generated.jsonc --bookmark "<bookmark>" --worker-version "<version-id>"
+```
+
+Alternatively, create a replacement D1 database from `renewlet-before-upgrade.sql`, review the binding, and use the same maintenance-first recovery procedure. A bookmark captured after a failed migration does not replace the pre-upgrade checkpoint.
+
+Cloud backup snapshots are limited to 16 MiB in both Docker and Cloudflare runtimes. Before upgrading from a version with a larger limit, download or restore every remote snapshot over 16 MiB with the old version.
+
+Imports, browser exports, and cloud backup contents use the stable `renewlet-export` schema v1. The `renewlet-cloud-backup-snapshot` transport wrapper also remains schema v1 and declares `exportSchemaVersion=1` for its inner payload.
+
 ## Optional: Wrangler CLI
 
 Most deployments do not need Wrangler CLI. Use these commands only if you want to manage Cloudflare resources from your own machine.
@@ -257,13 +285,13 @@ export WORKER_NAME="renewlet"
 export D1_DATABASE_ID="..."
 export R2_BUCKET_NAME="renewlet-assets"
 export CI_WRANGLER_CONFIG="wrangler.generated.jsonc"
+export CI_WRANGLER_MAINTENANCE_CONFIG="wrangler.maintenance.generated.jsonc"
+export CLOUDFLARE_OBSERVABILITY_PROFILE="development"
 
 pnpm cloudflare:config:ci
 pnpm check:cloudflare
 pnpm build:cloudflare
-pnpm exec wrangler d1 migrations apply DB --remote --config wrangler.generated.jsonc
-pnpm cloudflare:queues:ensure
-pnpm exec wrangler deploy --config wrangler.generated.jsonc
+pnpm deploy -- --config wrangler.generated.jsonc --maintenance-config wrangler.maintenance.generated.jsonc
 ```
 
 ## Other Configuration
@@ -282,11 +310,12 @@ Change `WORKER_NAME` in GitHub Secrets, then rerun the workflow.
 
 **Calendar feed says `no such table: calendar_feeds`?**
 
-This means the Worker was updated before the remote D1 migrations finished or ran. Re-run the `Cloudflare Worker` workflow, or run:
+This means an older deployment did not complete its remote D1 sequence. Re-run the `Cloudflare Worker` workflow, or run the same deployment orchestrator locally:
 
 ```bash
 pnpm cloudflare:config:ci
-pnpm exec wrangler d1 migrations apply DB --remote --config wrangler.generated.jsonc
+pnpm build:cloudflare
+pnpm deploy -- --config wrangler.generated.jsonc --maintenance-config wrangler.maintenance.generated.jsonc
 ```
 
 **ServerChan test notifications return HTTP 429?**

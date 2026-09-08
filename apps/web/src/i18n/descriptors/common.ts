@@ -3,6 +3,9 @@ import { msg } from "@lingui/core/macro";
 
 export const messages = [
   msg({ id: "app.tagline", message: "订阅管理助手" }),
+  msg({ id: "exchangeRates.refreshing", message: "刷新中..." }),
+  msg({ id: "exchangeRates.updated", message: "最新汇率数据已获取" }),
+  msg({ id: "exchangeRates.failedWithFallback", message: "汇率获取失败，当前使用备用汇率。{error}" }),
   msg({ id: "appError.title", message: "页面暂时无法显示" }),
   msg({ id: "appError.description", message: "发生了一个未预期的界面错误。你可以刷新页面重新加载，已保存的数据不会受到影响。" }),
   msg({ id: "appError.reload", message: "刷新页面" }),
@@ -53,7 +56,6 @@ export const messages = [
   msg({ id: "header.toggleTheme", message: "切换主题" }),
   msg({ id: "header.logout", message: "退出登录" }),
   msg({ id: "header.logoutSuccessTitle", message: "已退出登录" }),
-  msg({ id: "header.logoutSuccessDescription", message: "期待您的再次访问" }),
   msg({ id: "header.logoutFailedTitle", message: "退出失败" }),
   msg({ id: "system.openUpdateDialog", message: "打开系统更新" }),
   msg({ id: "system.badgeVersion", message: "v{version}" }),
@@ -79,7 +81,6 @@ export const messages = [
   msg({ id: "system.updateAvailableDescription", message: "可以更新到 v{version}。更新会替换 Docker 运行二进制。" }),
   msg({ id: "system.deployUpdateAvailableDescription", message: "可以更新到 v{version}。请通过部署流程升级。" }),
   msg({ id: "system.noUpdateTitle", message: "已是最新版本" }),
-  msg({ id: "system.noUpdateDescription", message: "无需操作。" }),
   msg({ id: "system.releaseLink", message: "发布页" }),
   msg({ id: "system.commitLink", message: "提交" }),
   msg({ id: "system.cloudflareDeployGuide", message: "Cloudflare 部署说明" }),
@@ -98,6 +99,7 @@ export const messages = [
   msg({ id: "notFound.home", message: "返回首页" }),
   msg({ id: "locale.zhCN", message: "中文" }),
   msg({ id: "locale.enUS", message: "English" }),
+  msg({ id: "locale.auto", message: "跟随当前设备" }),
   msg({ id: "reminder.days", message: "提前 {days} 天" }),
   msg({ id: "time.hour", message: "时" }),
   msg({ id: "time.minute", message: "分" }),

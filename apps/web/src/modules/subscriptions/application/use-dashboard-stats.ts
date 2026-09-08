@@ -5,19 +5,20 @@
  * `useExchangeRates`，因此 memo 依赖必须包含 `convert` 和 defaultCurrency。
  */
 import { useMemo } from "react";
-import type { Subscription } from "@/types/subscription";
+import type { SubscriptionCollectionItem } from "@/types/subscription";
+import type { DateOnly } from "@/lib/time/date-only";
 import { buildDashboardStats } from "../domain/dashboard-stats";
 
 /** 首页统计模型 hook。 */
 export function useDashboardStats(
-  subscriptions: readonly Subscription[],
+  subscriptions: readonly SubscriptionCollectionItem[],
   defaultCurrency: string,
   convert: (amount: number | string, from: string, to: string) => number,
-  timeZone: string,
+  today: DateOnly | string,
   notificationReminderDays: number,
 ) {
   return useMemo(
-    () => buildDashboardStats({ subscriptions, defaultCurrency, convert, timeZone, notificationReminderDays }),
-    [convert, defaultCurrency, notificationReminderDays, subscriptions, timeZone],
+    () => buildDashboardStats({ subscriptions, defaultCurrency, convert, today, notificationReminderDays }),
+    [convert, defaultCurrency, notificationReminderDays, subscriptions, today],
   );
 }

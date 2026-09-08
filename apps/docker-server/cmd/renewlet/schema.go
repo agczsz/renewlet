@@ -82,10 +82,10 @@ func ensureCollectionsSchema(app core.App) error {
 	if err := ensureSubscriptionSchedulerStatesCollection(app, users); err != nil {
 		return err
 	}
-	if err := ensureSubscriptionDerivedTables(app); err != nil {
+	if err := ensureSettingsCollection(app, users); err != nil {
 		return err
 	}
-	if err := ensureSettingsCollection(app, users); err != nil {
+	if err := ensureSubscriptionDerivedTables(app); err != nil {
 		return err
 	}
 	if err := ensureCustomConfigsCollection(app, users); err != nil {
@@ -145,10 +145,6 @@ func ensureUsersCollectionSchema(app core.App, users *core.Collection) error {
 		return err
 	}
 	return saveCollectionIfChanged(app, users, before, false)
-}
-
-func ensureField(collection *core.Collection, field core.Field) error {
-	return upsertField(collection, field)
 }
 
 func upsertField(collection *core.Collection, field core.Field) error {
@@ -585,6 +581,7 @@ func ensureCalendarFeedsCollection(app core.App, users *core.Collection) error {
 		c.AddIndex("idx_calendar_feeds_user_all_unique", true, "user", "scope = 'all'")
 		c.AddIndex("idx_calendar_feeds_token_unique", true, "token", "")
 		c.AddIndex("idx_calendar_feeds_user_subscription_unique", true, "user, subscriptionId", "scope = 'subscription'")
+		c.AddIndex("idx_calendar_feeds_user_scope_updated_id", false, "user, scope, updated DESC, id DESC", "")
 		return nil
 	})
 }
@@ -694,7 +691,7 @@ func migrateLegacyCloudBackupConfigRow(app core.App, targetCollection *core.Coll
 		ScheduleWeekday:   row.GetString("scheduleWeekday"),
 		Retention:         row.GetInt("retention"),
 	}
-	_ = policy.NormalizeAndValidate("zh-CN")
+	_ = policy.NormalizeAndValidate(defaultAppLocale)
 	status := nonEmptyCloudBackupStatus(row.GetString("lastStatus"))
 	for _, provider := range []string{cloudBackupProviderWebDAV, cloudBackupProviderS3} {
 		if provider == cloudBackupProviderWebDAV && stored.WebDAV == nil && strings.TrimSpace(credential.WebDAVPassword) == "" {

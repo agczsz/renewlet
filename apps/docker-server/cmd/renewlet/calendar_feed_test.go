@@ -20,7 +20,7 @@ func TestCalendarFeedLifecycleAndICSRoute(t *testing.T) {
 	}
 	user, token := createRouteTestUser(t, app, "calendar")
 	settings := defaultAppSettings()
-	settings.Locale = "en-US"
+	settings.LocalePreference = string(preferenceEnUS)
 	settings.Timezone = "UTC"
 	settings.NotificationReminderDays = 5
 	createCalendarFeedTestSettings(t, app, user, settings)
@@ -59,6 +59,9 @@ func TestCalendarFeedLifecycleAndICSRoute(t *testing.T) {
 	if createRes.Code != http.StatusOK {
 		t.Fatalf("expected calendar feed create 200, got %d: %s", createRes.Code, createRes.Body.String())
 	}
+	if got := createRes.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("expected calendar feed create no-store, got %q", got)
+	}
 	createBody := decodeAPISuccessDataForTest[calendarFeedCreateResponse](t, createRes.Body.Bytes())
 	if !createBody.CalendarFeed.Enabled || createBody.CalendarFeed.FeedURL == "" {
 		t.Fatalf("unexpected create response: %#v", createBody)
@@ -71,6 +74,9 @@ func TestCalendarFeedLifecycleAndICSRoute(t *testing.T) {
 	statusRes = serveTestRequest(t, app, http.MethodGet, "/api/app/calendar-feed", "", token)
 	if statusRes.Code != http.StatusOK || !strings.Contains(statusRes.Body.String(), createBody.CalendarFeed.FeedURL) || !strings.Contains(statusRes.Body.String(), `"enabled":true`) {
 		t.Fatalf("expected enabled status with feedUrl, got %d: %s", statusRes.Code, statusRes.Body.String())
+	}
+	if got := statusRes.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("expected calendar feed status no-store, got %q", got)
 	}
 
 	icsRes := serveTestRequest(t, app, http.MethodGet, calendarFeedRequestTarget(t, createBody.CalendarFeed.FeedURL), "", "")
@@ -151,7 +157,7 @@ func TestSubscriptionCalendarFeedLifecycleAndICSRoute(t *testing.T) {
 	}
 	user, token := createRouteTestUser(t, app, "calendar-subscription")
 	settings := defaultAppSettings()
-	settings.Locale = "en-US"
+	settings.LocalePreference = string(preferenceEnUS)
 	settings.Timezone = "UTC"
 	settings.NotificationReminderDays = 5
 	createCalendarFeedTestSettings(t, app, user, settings)
@@ -265,7 +271,7 @@ func TestSubscriptionCalendarICSDownload(t *testing.T) {
 	user, token := createRouteTestUser(t, app, "calendar-download")
 	otherUser, otherToken := createRouteTestUser(t, app, "calendar-download-other")
 	settings := defaultAppSettings()
-	settings.Locale = "en-US"
+	settings.LocalePreference = string(preferenceEnUS)
 	settings.Timezone = "UTC"
 	settings.NotificationReminderDays = 5
 	createCalendarFeedTestSettings(t, app, user, settings)
@@ -395,7 +401,7 @@ func TestCalendarFeedUsesBuiltInLabelsWhenCustomConfigIsMissing(t *testing.T) {
 	}
 	user, token := createRouteTestUser(t, app, "calendar-built-in-labels")
 	settings := defaultAppSettings()
-	settings.Locale = "zh-CN"
+	settings.LocalePreference = string(preferenceZhCN)
 	settings.Timezone = "UTC"
 	createCalendarFeedTestSettings(t, app, user, settings)
 	createCalendarFeedTestSubscription(t, app, user.Id, calendarFeedTestSubscription{
@@ -441,7 +447,7 @@ func TestCalendarFeedDescribesCustomCycleUnit(t *testing.T) {
 	}
 	user, token := createRouteTestUser(t, app, "calendar-custom-cycle")
 	settings := defaultAppSettings()
-	settings.Locale = "zh-CN"
+	settings.LocalePreference = string(preferenceZhCN)
 	settings.Timezone = "UTC"
 	createCalendarFeedTestSettings(t, app, user, settings)
 	createCalendarFeedTestSubscription(t, app, user.Id, calendarFeedTestSubscription{
@@ -478,7 +484,7 @@ func TestCalendarFeedUsesBuiltInLabelsWhenCustomConfigMissesEntry(t *testing.T) 
 	}
 	user, token := createRouteTestUser(t, app, "calendar-missing-config-labels")
 	settings := defaultAppSettings()
-	settings.Locale = "zh-CN"
+	settings.LocalePreference = string(preferenceZhCN)
 	settings.Timezone = "UTC"
 	createCalendarFeedTestSettings(t, app, user, settings)
 	createCalendarFeedTestCustomConfig(t, app, user.Id, func(config *customConfigPayload) {
@@ -529,7 +535,7 @@ func TestCalendarFeedPreservesUnknownConfigValues(t *testing.T) {
 	}
 	user, token := createRouteTestUser(t, app, "calendar-unknown-labels")
 	settings := defaultAppSettings()
-	settings.Locale = "en-US"
+	settings.LocalePreference = string(preferenceEnUS)
 	settings.Timezone = "UTC"
 	createCalendarFeedTestSettings(t, app, user, settings)
 	createCalendarFeedTestSubscription(t, app, user.Id, calendarFeedTestSubscription{

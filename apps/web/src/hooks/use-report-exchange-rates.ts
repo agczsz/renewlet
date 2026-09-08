@@ -64,36 +64,32 @@ export function createUseReportExchangeRates(store: ExchangeRateStore) {
       loaded: false,
     });
     const [captureError, setCaptureError] = useState<unknown>(null);
-    const loadedMonthRef = useRef<string | null>(null);
     const capturedSignatureRef = useRef<string>("");
     const month = currentReportMonthUTC();
     const snapshotLoaded = snapshotState.month === month && snapshotState.loaded;
     const currentSnapshot = snapshotLoaded ? snapshotState.snapshot : null;
 
     useEffect(() => {
-      let cancelled = false;
-      loadedMonthRef.current = month;
+      const controller = new AbortController();
       capturedSignatureRef.current = "";
       // 先读当前月快照再决定 capture；loaded 和 snapshot 必须原子更新，避免短暂 null 被误判成未锁定。
       setSnapshotState({ month, snapshot: null, loaded: false });
-      void exchangeRateSnapshotService.list({ from: month, to: month })
+      void exchangeRateSnapshotService.list({ from: month, to: month }, controller.signal)
         .then((snapshots) => {
-          if (!cancelled && loadedMonthRef.current === month) {
+          if (!controller.signal.aborted) {
             setSnapshotState({ month, snapshot: snapshots[0] ?? null, loaded: true });
           }
         })
         .catch(() => {
-          if (!cancelled && loadedMonthRef.current === month) {
+          if (!controller.signal.aborted) {
             setSnapshotState({ month, snapshot: null, loaded: true });
           }
         });
-      return () => {
-        cancelled = true;
-      };
+      return () => controller.abort();
     }, [month]);
 
     useEffect(() => {
-      if (!snapshotLoaded || live.loading || !isSnapshotProvider(live.activeProvider) || !live.sourceDate) return;
+      if (!snapshotLoaded || live.loading || live.isRefreshing || !isSnapshotProvider(live.activeProvider) || !live.sourceDate) return;
       const snapshotBody = {
         base: "USD" as const,
         rates: live.rates,
@@ -104,19 +100,23 @@ export function createUseReportExchangeRates(store: ExchangeRateStore) {
       };
       const signature = exchangeRateSnapshotSignature(snapshotBody);
       if (capturedSignatureRef.current === signature || exchangeRateSnapshotSignature(currentSnapshot) === signature) return;
+      const controller = new AbortController();
       capturedSignatureRef.current = signature;
       // 当前月快照是报表口径缓存，不是实时汇率请求的成功条件；capture 失败只降级为未锁定状态。
-      void exchangeRateSnapshotService.capture(month, snapshotBody)
+      void exchangeRateSnapshotService.capture(month, snapshotBody, controller.signal)
         .then((snapshot) => {
+          if (controller.signal.aborted) return;
           setSnapshotState({ month, snapshot, loaded: true });
           setCaptureError(null);
         })
         .catch((error) => {
+          if (controller.signal.aborted) return;
           capturedSignatureRef.current = "";
           setCaptureError(error);
           console.warn("Failed to capture report exchange-rate snapshot:", error);
         });
-    }, [currentSnapshot, live.activeProvider, live.loading, live.rates, live.sourceDate, live.warning, month, preferredProvider, snapshotLoaded]);
+      return () => controller.abort();
+    }, [currentSnapshot, live.activeProvider, live.isRefreshing, live.loading, live.rates, live.sourceDate, live.warning, month, preferredProvider, snapshotLoaded]);
 
     const reportBasisStatus = useMemo<ReportExchangeRateBasisStatus>(() => ({
       month,
@@ -144,7 +144,9 @@ export function createUseReportExchangeRates(store: ExchangeRateStore) {
       activeProvider: currentSnapshot?.provider ?? live.activeProvider,
       sourceDate: currentSnapshot?.sourceDate ?? live.sourceDate,
       lastUpdated: snapshotCapturedDate(currentSnapshot) ?? live.lastUpdated,
+      // 锁定快照保证报表可继续读取；主动刷新进度必须单独透出，不能让旧口径掩盖按钮状态。
       loading: currentSnapshot ? false : live.loading,
+      isRefreshing: live.isRefreshing,
       convert,
       reportBasisStatus,
       reportBasisCaptureError: captureError,

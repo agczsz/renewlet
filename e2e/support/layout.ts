@@ -54,6 +54,65 @@ export async function expectLabelControlGap(control: Locator, label: string) {
   }, `${label}: stable label/control gap`).toPass();
 }
 
+export async function expectFormFieldRowAlignment(
+  row: Locator,
+  label: string,
+  options: { action?: boolean } = {},
+) {
+  await expect(row, `${label}: row visible before layout measurement`).toBeVisible();
+  await expect.poll(async () => row.evaluate((element, expectAction) => {
+    const layout = element.firstElementChild;
+    if (!(layout instanceof HTMLElement)) {
+      throw new Error("Missing FormFieldRow layout");
+    }
+
+    const fields = Array.from(layout.children).filter((child): child is HTMLElement => (
+      child instanceof HTMLElement && child.dataset.slot === "form-field"
+    ));
+    const labelTops = fields.map((field) => {
+      const fieldLabel = field.querySelector<HTMLElement>('[data-slot="form-field-label"] label');
+      if (!fieldLabel) throw new Error("Missing FormField label");
+      return fieldLabel.getBoundingClientRect().top;
+    });
+    const controlTops = fields.map((field) => {
+      const control = field.querySelector<HTMLElement>('[data-slot="form-field-control"]');
+      if (!control) throw new Error("Missing FormField control");
+      return control.getBoundingClientRect().top;
+    });
+    const action = layout.querySelector<HTMLElement>(
+      ':scope > [data-slot="form-field-row-action"] > [data-slot="form-field-row-action-control"]',
+    );
+    if (expectAction && !action) throw new Error("Missing FormFieldRow action");
+    const actionTop = action?.getBoundingClientRect().top;
+    const spread = (values: number[]) => Math.max(...values) - Math.min(...values);
+
+    return spread(labelTops) <= 1
+      && spread(controlTops) <= 1
+      && (actionTop === undefined || Math.abs(actionTop - controlTops[0]!) <= 1);
+  }, Boolean(options.action)), { message: `${label}: shared field tracks` }).toBe(true);
+}
+
+export async function expectFormFieldRowStacked(row: Locator, label: string) {
+  await expect(row, `${label}: row visible before mobile layout measurement`).toBeVisible();
+  const metrics = await row.evaluate((element) => {
+    const layout = element.firstElementChild;
+    if (!(layout instanceof HTMLElement)) {
+      throw new Error("Missing FormFieldRow layout");
+    }
+    const children = Array.from(layout.children).filter((child): child is HTMLElement => (
+      child instanceof HTMLElement && child.offsetParent !== null
+    ));
+    const rects = children.map((child) => child.getBoundingClientRect());
+    return {
+      ordered: rects.every((rect, index) => index === 0 || rect.top >= rects[index - 1]!.bottom - 1),
+      overflow: Math.max(0, layout.scrollWidth - layout.clientWidth),
+    };
+  });
+
+  expect(metrics.ordered, `${label}: fields and action follow mobile DOM order`).toBe(true);
+  expect(metrics.overflow, `${label}: row horizontal overflow`).toBeLessThanOrEqual(1);
+}
+
 interface LayoutSnapshot {
   header: { x: number };
   content: { x: number };
@@ -129,10 +188,73 @@ export async function expectNoHorizontalOverflow(page: Page, label: string) {
   expect(metrics.bodyScrollWidth - metrics.bodyClientWidth, `${label}: body horizontal overflow`).toBeLessThanOrEqual(1);
 }
 
-export async function expectTouchTarget(locator: Locator, label: string, minSize = 24) {
-  const box = await getRequiredLocatorBoundingBox(locator, label);
+export async function expectTouchTarget(locator: Locator, label: string, minSize = 44) {
+  const box = await getTouchTargetBoundingBox(locator, label);
   expect(box.width, `${label}: touch target width`).toBeGreaterThanOrEqual(minSize);
   expect(box.height, `${label}: touch target height`).toBeGreaterThanOrEqual(minSize);
+}
+
+export async function expectTouchTargetsDoNotOverlap(first: Locator, second: Locator, label: string) {
+  const [firstBox, secondBox] = await Promise.all([
+    getTouchTargetBoundingBox(first, `${label} first target`),
+    getTouchTargetBoundingBox(second, `${label} second target`),
+  ]);
+  const overlapWidth = Math.max(
+    0,
+    Math.min(firstBox.x + firstBox.width, secondBox.x + secondBox.width) - Math.max(firstBox.x, secondBox.x),
+  );
+  const overlapHeight = Math.max(
+    0,
+    Math.min(firstBox.y + firstBox.height, secondBox.y + secondBox.height) - Math.max(firstBox.y, secondBox.y),
+  );
+  expect(overlapWidth * overlapHeight, `${label}: touch target overlap area`).toBe(0);
+}
+
+async function getTouchTargetBoundingBox(locator: Locator, label: string) {
+  await expect(locator, `${label}: target visible before layout measurement`).toBeVisible();
+  const box = await locator.evaluate((element) => {
+    if (!(element instanceof HTMLElement)) {
+      throw new Error("Touch target is not an HTMLElement");
+    }
+    const rect = element.getBoundingClientRect();
+    const pseudo = window.getComputedStyle(element, "::after");
+    const pseudoWidth = Number.parseFloat(pseudo.width);
+    const pseudoHeight = Number.parseFloat(pseudo.height);
+    const width = pseudo.content !== "none" && Number.isFinite(pseudoWidth) ? Math.max(rect.width, pseudoWidth) : rect.width;
+    const height = pseudo.content !== "none" && Number.isFinite(pseudoHeight) ? Math.max(rect.height, pseudoHeight) : rect.height;
+    let left = rect.x - (width - rect.width) / 2;
+    let right = left + width;
+    let top = rect.y - (height - rect.height) / 2;
+    let bottom = top + height;
+    let ancestor = element.parentElement;
+    while (ancestor) {
+      const ancestorStyle = window.getComputedStyle(ancestor);
+      const ancestorRect = ancestor.getBoundingClientRect();
+      if (ancestorStyle.overflowX !== "visible") {
+        left = Math.max(left, ancestorRect.left);
+        right = Math.min(right, ancestorRect.right);
+      }
+      if (ancestorStyle.overflowY !== "visible") {
+        top = Math.max(top, ancestorRect.top);
+        bottom = Math.min(bottom, ancestorRect.bottom);
+      }
+      ancestor = ancestor.parentElement;
+    }
+    left = Math.max(left, 0);
+    right = Math.min(right, window.innerWidth);
+    top = Math.max(top, 0);
+    bottom = Math.min(bottom, window.innerHeight);
+    return {
+      x: left,
+      y: top,
+      width: Math.max(0, right - left),
+      height: Math.max(0, bottom - top),
+    };
+  });
+  if (box.width <= 0 || box.height <= 0) {
+    throw new Error(`Missing bounding box for ${label}`);
+  }
+  return box;
 }
 
 export async function expectActionNearContainerBottom(
@@ -194,6 +316,126 @@ export async function expectScrollContentNearFooter(
 
   expect(gap, `${label}: scroll content to footer gap`).toBeGreaterThanOrEqual(0);
   expect(gap, `${label}: scroll content to footer gap`).toBeLessThanOrEqual(maxGap);
+}
+
+export async function expectScrollableRegionReachesTarget(
+  scrollRegion: Locator,
+  target: Locator,
+  label: string,
+) {
+  await expect(scrollRegion, `${label}: scroll region visible`).toBeVisible();
+  await expect(target, `${label}: final target rendered`).toBeVisible();
+
+  const range = await scrollRegion.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(range.scrollHeight, `${label}: content overflows scroll region`).toBeGreaterThan(range.clientHeight);
+
+  await scrollRegion.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect.poll(
+    () => scrollRegion.evaluate((element) => element.scrollTop),
+    { message: `${label}: scroll reaches end` },
+  ).toBeGreaterThanOrEqual(range.scrollHeight - range.clientHeight - 1);
+
+  const [scrollRect, targetRect] = await Promise.all([
+    scrollRegion.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { bottom: rect.bottom, top: rect.top };
+    }),
+    target.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { bottom: rect.bottom, top: rect.top };
+    }),
+  ]);
+  expect(targetRect.top, `${label}: final target top inside scroll region`).toBeGreaterThanOrEqual(scrollRect.top - 1);
+  expect(targetRect.bottom, `${label}: final target bottom inside scroll region`).toBeLessThanOrEqual(
+    scrollRect.bottom + 1,
+  );
+}
+
+async function waitForContainingDialogAnimations(target: Locator, label: string) {
+  // Vaul 在 data-state=open 的首帧就已可见；绝对几何只能在所属弹窗的真实动画完成后采样。
+  await target.evaluate(async (element, animationLabel) => {
+    const dialog = element.closest<HTMLElement>('[role="dialog"]');
+    if (!dialog) throw new Error(`Missing dialog for ${animationLabel}`);
+    await Promise.all(dialog.getAnimations().map((animation) => animation.finished.catch(() => undefined)));
+  }, label);
+}
+
+export async function expectDetailFooterStableWhileScrolling(
+  scrollRegion: Locator,
+  finalContent: Locator,
+  label: string,
+) {
+  await expect(scrollRegion, `${label}: detail scroll region visible`).toBeVisible();
+  await expect(finalContent, `${label}: final detail content rendered`).toBeVisible();
+  await waitForContainingDialogAnimations(scrollRegion, label);
+  const before = await scrollRegion.evaluate((element) => {
+    const footer = element.parentElement?.querySelector<HTMLElement>("[data-subscription-dialog-footer]");
+    if (!footer) throw new Error("Missing subscription detail footer");
+    const footerRect = footer.getBoundingClientRect();
+    return {
+      clientHeight: element.clientHeight,
+      footer: {
+        bottom: footerRect.bottom,
+        left: footerRect.left,
+        right: footerRect.right,
+        top: footerRect.top,
+      },
+      scrollHeight: element.scrollHeight,
+    };
+  });
+  expect(before.scrollHeight, `${label}: detail content overflows`).toBeGreaterThan(before.clientHeight);
+
+  await scrollRegion.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect.poll(
+    () => scrollRegion.evaluate((element) => element.scrollTop),
+    { message: `${label}: detail scroll reaches end` },
+  ).toBeGreaterThanOrEqual(before.scrollHeight - before.clientHeight - 1);
+
+  const [after, finalContentRect] = await Promise.all([
+    scrollRegion.evaluate((element) => {
+      const footer = element.parentElement?.querySelector<HTMLElement>("[data-subscription-dialog-footer]");
+      if (!footer) throw new Error("Missing subscription detail footer");
+      const footerRect = footer.getBoundingClientRect();
+      const scrollRect = element.getBoundingClientRect();
+      return {
+        footer: {
+          bottom: footerRect.bottom,
+          left: footerRect.left,
+          right: footerRect.right,
+          top: footerRect.top,
+        },
+        footerTop: footerRect.top,
+        scrollBottom: scrollRect.bottom,
+        scrollTop: scrollRect.top,
+      };
+    }),
+    finalContent.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { bottom: rect.bottom };
+    }),
+  ]);
+
+  for (const edge of ["top", "right", "bottom", "left"] as const) {
+    expect(Math.abs(after.footer[edge] - before.footer[edge]), `${label}: footer ${edge} offset`).toBeLessThanOrEqual(1);
+  }
+  expect(finalContentRect.bottom, `${label}: final content reaches visible scroll area`).toBeGreaterThanOrEqual(
+    after.scrollTop - 1,
+  );
+  expect(finalContentRect.bottom, `${label}: final content stays above scroll bottom`).toBeLessThanOrEqual(
+    after.scrollBottom + 1,
+  );
+  expect(finalContentRect.bottom, `${label}: final content stays above fixed footer`).toBeLessThanOrEqual(
+    after.footerTop + 1,
+  );
 }
 
 export async function captureLogoSheetScrollMetrics(sheet: Locator, viewportTestId: string | null) {

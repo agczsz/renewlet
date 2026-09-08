@@ -5,8 +5,10 @@ import {
   type CloudBackupSnapshotManifest,
 } from "@renewlet/shared/schemas/cloud-backup";
 import {
+  RENEWLET_EXPORT_SCHEMA_VERSION,
   renewletExportManifestV1Schema,
   renewletExportV1Schema,
+  toRenewletExportSettingsV1,
   type RenewletExportAsset,
   type RenewletExportMissingAsset,
   type RenewletExportMissingAssetReason,
@@ -17,11 +19,11 @@ import { sanitizeSettingsForCloudBackup } from "./cloud-backup-sanitize";
 import { sha256Hex, snapshotId } from "./cloud-backup-remote";
 import { extensionFromMime, privateAssetIdFromLogo } from "./cloud-backup-utils";
 import { listExchangeRateSnapshots } from "./exchange-rate-snapshots";
-import { createStoredZip } from "./zip-store";
+import { createStoredZipFromSources, type StoredZipSource } from "./zip-store";
 import type { Env } from "./types";
 
 const textEncoder = new TextEncoder();
-// 导出资产必须保持上传同一 2MiB 上限；快照 50MiB 上限只约束整包，不能让旧大对象绕过恢复上传校验。
+// 导出资产必须保持上传同一 2MiB 上限；整包 16MiB 约束不能让旧大对象绕过恢复上传校验。
 const MAX_EXPORT_ASSET_BYTES = 2 * 1024 * 1024;
 
 export type CloudBackupSnapshotPayload = {
@@ -31,8 +33,9 @@ export type CloudBackupSnapshotPayload = {
   manifest: CloudBackupSnapshotManifest;
 };
 
-type ExportAsset = RenewletExportAsset & {
-  content: Uint8Array;
+type ExportAsset = Omit<RenewletExportAsset, "sizeBytes"> & {
+  sizeBytes: number;
+  r2Key: string;
 };
 
 type ExportAssetReadResult =
@@ -66,12 +69,13 @@ export async function buildCloudBackupSnapshotPayload(env: Env, userId: string):
     sizeBytes: content.length,
     sha256: await sha256Hex(content),
     exportKind: "renewlet-export",
-    exportSchemaVersion: 1,
+    exportSchemaVersion: RENEWLET_EXPORT_SCHEMA_VERSION,
   });
   return { content, id, filename, manifest };
 }
 
 export async function buildCloudBackupExportZip(env: Env, userId: string): Promise<{ content: Uint8Array; exportedAt: Date }> {
+  const startedAt = performance.now();
   const exportedAt = new Date();
   const collector: ExportAssetCollector = { assets: [], assetById: new Map(), missingAssets: [] };
   const subscriptions = await listSubscriptions(env, userId);
@@ -92,18 +96,19 @@ export async function buildCloudBackupExportZip(env: Env, userId: string): Promi
     exportSubscriptions.push(subscription);
   }
   const customConfig = await buildExportCustomConfig(env, userId, collector);
-  // 云备份使用业务恢复 allowlist 组包；sessions/MFA/passkey/tickets 和 R2 系统密钥对象都不进入 ZIP。
+  // 云备份使用业务恢复 allowlist 组包；settings 必须经过 shared v1 投影，避免 Worker 与浏览器互导漂移。
+  // sessions/MFA/passkey/tickets 和 R2 系统密钥对象都不进入 ZIP。
   const payload = renewletExportV1Schema.parse({
     kind: "renewlet-export",
-    schemaVersion: 1,
+    schemaVersion: RENEWLET_EXPORT_SCHEMA_VERSION,
     exportedAt: exportedAt.toISOString(),
     data: {
       subscriptions: exportSubscriptions,
-      settings: sanitizeSettingsForCloudBackup(await getSettings(env, userId)),
+      settings: toRenewletExportSettingsV1(sanitizeSettingsForCloudBackup(await getSettings(env, userId))),
       customConfig,
       exchangeRateSnapshots: await listExchangeRateSnapshots(env, userId),
       ...(collector.assets.length > 0
-        ? { assets: collector.assets.map(({ content: _content, ...asset }) => asset) }
+        ? { assets: collector.assets.map(({ r2Key: _r2Key, ...asset }) => asset) }
         : {}),
     },
   });
@@ -116,12 +121,31 @@ export async function buildCloudBackupExportZip(env: Env, userId: string): Promi
     // 缺失详情只保留业务引用和原因枚举，不能把 D1/R2 key、raw error 或对象存储路径写进备份包。
     missingAssets: collector.missingAssets,
   });
-  const zipEntries = [
-    ...collector.assets.map((asset) => ({ name: asset.path, data: asset.content, date: exportedAt })),
-    { name: "data.json", data: textEncoder.encode(JSON.stringify(payload, null, 2)), date: exportedAt },
-    { name: "manifest.json", data: textEncoder.encode(JSON.stringify(manifest, null, 2)), date: exportedAt },
+  const payloadJson = JSON.stringify(payload, null, 2);
+  const manifestJson = JSON.stringify(manifest, null, 2);
+  const sources: StoredZipSource[] = [
+    ...collector.assets.map((asset) => ({
+      name: asset.path,
+      size: asset.sizeBytes,
+      date: exportedAt,
+      load: async () => await readExportAssetContent(env, asset),
+    })),
+    { name: "data.json", size: utf8ByteLength(payloadJson), date: exportedAt, text: payloadJson },
+    { name: "manifest.json", size: utf8ByteLength(manifestJson), date: exportedAt, text: manifestJson },
   ];
-  return { content: createStoredZip(zipEntries, exportedAt), exportedAt };
+  const content = await createStoredZipFromSources(sources, exportedAt, CLOUD_BACKUP_MAX_SNAPSHOT_BYTES);
+  console.info("cloud_backup_snapshot_resources", {
+    event: "cloud_backup_snapshot_resources",
+    entries: sources.length,
+    assetBytes: collector.assets.reduce((total, asset) => total + asset.sizeBytes, 0),
+    zipBytes: content.byteLength,
+    durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
+  });
+  return { content, exportedAt };
+}
+
+function utf8ByteLength(value: string): number {
+  return textEncoder.encode(value).byteLength;
 }
 
 export async function verifySnapshotBytes(content: Uint8Array, manifest: CloudBackupSnapshotManifest): Promise<boolean> {
@@ -174,11 +198,11 @@ async function readExportAsset(env: Env, userId: string, assetId: string): Promi
     // D1 asset metadata 是 owner 和 R2 key 的事实来源；R2 对象缺失只让引用进入 manifest 审计，不阻断整份快照。
     const row = await getAsset(env, userId, assetId);
     if (!row) return { ok: false, reason: "not_found" };
-    const object = await env.ASSETS_BUCKET.get(row.r2_key);
+    const object = await env.ASSETS_BUCKET.head(row.r2_key);
     if (!object) return { ok: false, reason: "file_missing" };
     if (row.size_bytes !== null && row.size_bytes > MAX_EXPORT_ASSET_BYTES) return { ok: false, reason: "too_large" };
-    const content = new Uint8Array(await object.arrayBuffer());
-    if (content.length > MAX_EXPORT_ASSET_BYTES) return { ok: false, reason: "too_large" };
+    if (object.size > MAX_EXPORT_ASSET_BYTES) return { ok: false, reason: "too_large" };
+    if (row.size_bytes !== null && row.size_bytes !== object.size) return { ok: false, reason: "read_failed" };
     const mimeType = row.mime_type ?? object.httpMetadata?.contentType ?? "application/octet-stream";
     return {
       ok: true,
@@ -187,11 +211,20 @@ async function readExportAsset(env: Env, userId: string, assetId: string): Promi
         path: `assets/${assetId}${extensionFromMime(mimeType, row.original_name ?? "")}`,
         ...(row.original_name ? { originalName: row.original_name } : {}),
         mimeType,
-        sizeBytes: content.length,
-        content,
+        sizeBytes: object.size,
+        r2Key: row.r2_key,
       },
     };
   } catch {
     return { ok: false, reason: "read_failed" };
   }
+}
+
+async function readExportAssetContent(env: Env, asset: ExportAsset): Promise<Uint8Array> {
+  const object = await env.ASSETS_BUCKET.get(asset.r2Key);
+  if (!object) throw new Error("CLOUD_BACKUP_ASSET_MISSING");
+  const content = new Uint8Array(await object.arrayBuffer());
+  if (content.length > MAX_EXPORT_ASSET_BYTES) throw new Error("CLOUD_BACKUP_ASSET_TOO_LARGE");
+  if (content.length !== asset.sizeBytes) throw new Error("CLOUD_BACKUP_ASSET_SIZE_MISMATCH");
+  return content;
 }

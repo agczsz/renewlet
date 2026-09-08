@@ -2,7 +2,7 @@
   "name": "@renewlet/shared",
   "private": true,
   "license": "MIT",
-  "version": "0.3.0",
+  "version": "0.3.25",
   "type": "module",
   "exports": {
     "./schemas/api": "./src/schemas/api.ts",
@@ -22,6 +22,7 @@
     "./schemas/notifications": "./src/schemas/notifications.ts",
     "./schemas/public-api": "./src/schemas/public-api.ts",
     "./schemas/public-status": "./src/schemas/public-status.ts",
+    "./schemas/secrets": "./src/schemas/secrets.ts",
     "./schemas/settings": "./src/schemas/settings.ts",
     "./schemas/subscriptions": "./src/schemas/subscriptions.ts",
     "./schemas/telegram-bot": "./src/schemas/telegram-bot.ts",
@@ -44,6 +45,7 @@
     "./online-icon-sources": "./src/online-icon-sources.ts",
     "./email-template": "./src/email-template.ts",
     "./ics": "./src/ics.ts",
+    "./i18n-config": "./src/i18n-config.ts",
     "./subscription-billing": "./src/subscription-billing.ts",
     "./subscription-renewal": "./src/subscription-renewal.ts",
     "./settings-normalization": "./src/settings-normalization.ts",
@@ -51,7 +53,8 @@
     "./runtime": "./src/runtime.ts"
   },
   "scripts": {
-    "test:run": "vitest run",
+    "test:perf": "vitest run src/contract-fixtures.performance.test.ts",
+    "test:run": "vitest run --exclude '**/*.performance.test.ts'",
     "typecheck": "tsc --noEmit --project tsconfig.json"
   },
   "dependencies": {

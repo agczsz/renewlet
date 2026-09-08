@@ -15,6 +15,7 @@ import { useDeferredDialogCleanup } from "@/hooks/use-deferred-dialog-cleanup";
 import type { Subscription } from "@/types/subscription";
 import { DISABLED_REMINDER_DAYS, INHERIT_REMINDER_DAYS, REMINDER_DAYS_OPTIONS } from "@/types/subscription";
 import { createSubscriptionFormState, type SubscriptionFormState } from "@/types/subscription-form";
+import { isOneTimeFixedTerm } from "@/lib/subscription-billing";
 
 type SubscriptionDialogSessionMode = "create" | "edit";
 
@@ -56,7 +57,9 @@ export function useSubscriptionDialogSession({
   const [formData, setFormData] = useState<SubscriptionFormState>(() =>
     mode === "create"
       ? createCreateFormState(defaultCreateCurrency, initialSubscription)
-      : createSubscriptionFormState(),
+      : editSubscription
+        ? subscriptionToFormState(editSubscription)
+        : createSubscriptionFormState(),
   );
 
   const resetTransientState = useCallback(() => {
@@ -122,7 +125,7 @@ export function useSubscriptionDialogSession({
     open,
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (mode !== "create") return;
     if (!open) return;
     if (!initialSubscription) return;
@@ -133,7 +136,7 @@ export function useSubscriptionDialogSession({
     resetTransientState();
   }, [initialSubscription, mode, open, resetTransientState]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (mode !== "edit") return;
     if (!open) return;
     if (!editSubscription) return;
@@ -217,6 +220,7 @@ function subscriptionToFormState(subscription: Subscription): SubscriptionFormSt
   const isDisabledReminder = subscription.reminderDays === DISABLED_REMINDER_DAYS;
   const isInheritReminder = subscription.reminderDays === INHERIT_REMINDER_DAYS;
   const isPresetReminder = REMINDER_DAYS_OPTIONS.some((opt) => opt.value === subscription.reminderDays);
+  const isFixedTerm = isOneTimeFixedTerm(subscription);
 
   return {
     name: subscription.name,
@@ -225,9 +229,9 @@ function subscriptionToFormState(subscription: Subscription): SubscriptionFormSt
     currency: subscription.currency,
     billingCycle: subscription.billingCycle,
     customDays: subscription.customDays?.toString() || "",
-    customCycleUnit: subscription.customCycleUnit ?? "day",
-    oneTimeMode: subscription.billingCycle === "one-time" && subscription.oneTimeTermCount && subscription.oneTimeTermUnit ? "term" : "buyout",
-    oneTimeTermCount: subscription.billingCycle === "one-time" && subscription.oneTimeTermCount ? subscription.oneTimeTermCount.toString() : "1",
+    customCycleUnit: subscription.billingCycle === "custom" ? subscription.customCycleUnit : "day",
+    oneTimeMode: isFixedTerm ? "term" : "buyout",
+    oneTimeTermCount: isFixedTerm ? String(subscription.oneTimeTermCount) : "1",
     oneTimeTermUnit: subscription.billingCycle === "one-time" ? subscription.oneTimeTermUnit ?? "month" : "month",
     category: subscription.category,
     status: subscription.status,
@@ -246,6 +250,6 @@ function subscriptionToFormState(subscription: Subscription): SubscriptionFormSt
     costSharing: subscription.costSharing,
     website: subscription.website ?? "",
     notes: subscription.notes ?? "",
-    tags: subscription.tags ?? [],
+    tags: subscription.tags,
   };
 }

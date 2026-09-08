@@ -235,6 +235,34 @@ https://<WORKER_NAME>.<workers-dev-subdomain>.workers.dev/setup
 
 手动部署用户：在你的 fork 里点击 `Sync fork` / `Update branch`，把 fork 更新到 Renewlet 最新版本。如果没有自动部署，进入 `Actions` 手动运行 `Cloudflare Worker`。
 
+## D1 升级与恢复
+
+升级 schema 前，先创建一份可移植 SQL 导出。`pnpm deploy` 会在首次 D1 写入前自动捕获当前 Time Travel bookmark 和线上 Worker version，并写入 GitHub job summary 或本地输出。
+
+```bash
+pnpm exec wrangler d1 export DB --remote --config wrangler.generated.jsonc --output renewlet-before-upgrade.sql
+```
+
+普通升级保持在线。检测到尚未应用的 `_exclusive_` 排他 migration 时，部署编排器会先用同一份 Worker bundle 部署维护配置，解绑 Cron 和 Queue consumer，并等待 Cloudflare 后台 invocation 的 15 分钟最长执行时间。API、ICS 和 webhook 返回带 `Retry-After: 900`、`Cache-Control: no-store` 的 `503`，Static Assets 仍继续提供 SPA。
+
+```bash
+pnpm deploy -- --config wrangler.generated.jsonc --maintenance-config wrangler.maintenance.generated.jsonc
+```
+
+排空后，编排器会保护日历 Feed、执行 migration、重建派生状态、检查外键以及 settings 数据/trigger 完整定义，再部署正常配置并校验 active Worker version。首次 D1 写入前失败会自动恢复旧 Worker、Cron 和 Queue consumer；首次写入后失败则保持或重新部署维护模式。修复原因后重跑同一条 deploy 命令即可；已写入的 migration marker 会被复核，不会重复执行已完成 migration。
+
+如果决定回退数据契约，必须先审查 checkpoint 之后的所有写入。恢复会原地覆盖数据，只能使用下面的统一命令：它先部署维护配置并排空后台任务，D1 restore 成功后才回滚 Worker 和恢复触发器。排他 migration 后禁止单独执行 Worker rollback。
+
+```bash
+pnpm cloudflare:deploy:recover -- --config wrangler.generated.jsonc --maintenance-config wrangler.maintenance.generated.jsonc --bookmark "<bookmark>" --worker-version "<version-id>"
+```
+
+也可以从 `renewlet-before-upgrade.sql` 创建替代 D1 数据库，复核 binding 后仍按同一套维护优先恢复流程操作。失败后才捕获的 bookmark 不能替代升级前 checkpoint。
+
+Docker 与 Cloudflare 运行面的云备份快照上限统一为 16 MiB。若旧版本曾允许更大快照，升级前必须先用旧版本下载或恢复所有超过 16 MiB 的远端快照。
+
+导入、浏览器导出和云备份内容统一使用稳定的 `renewlet-export` schema v1；`renewlet-cloud-backup-snapshot` 传输封装同样保持 schema v1，并通过 `exportSchemaVersion=1` 声明内部载荷。
+
 ## 可选：Wrangler CLI
 
 普通部署不需要使用 Wrangler CLI。只有你想在本机直接管理 Cloudflare 资源时，再使用下面的命令。
@@ -257,13 +285,13 @@ export WORKER_NAME="renewlet"
 export D1_DATABASE_ID="..."
 export R2_BUCKET_NAME="renewlet-assets"
 export CI_WRANGLER_CONFIG="wrangler.generated.jsonc"
+export CI_WRANGLER_MAINTENANCE_CONFIG="wrangler.maintenance.generated.jsonc"
+export CLOUDFLARE_OBSERVABILITY_PROFILE="development"
 
 pnpm cloudflare:config:ci
 pnpm check:cloudflare
 pnpm build:cloudflare
-pnpm exec wrangler d1 migrations apply DB --remote --config wrangler.generated.jsonc
-pnpm cloudflare:queues:ensure
-pnpm exec wrangler deploy --config wrangler.generated.jsonc
+pnpm deploy -- --config wrangler.generated.jsonc --maintenance-config wrangler.maintenance.generated.jsonc
 ```
 
 ## 其他配置
@@ -282,11 +310,12 @@ pnpm exec wrangler deploy --config wrangler.generated.jsonc
 
 **日历订阅提示 `no such table: calendar_feeds`？**
 
-说明 Worker 已更新，但远端 D1 migrations 没有完成或没有运行。重新运行 `Cloudflare Worker` workflow，或执行：
+说明旧部署没有完成远端 D1 状态机。重新运行 `Cloudflare Worker` workflow，或在本地执行同一个部署编排器：
 
 ```bash
 pnpm cloudflare:config:ci
-pnpm exec wrangler d1 migrations apply DB --remote --config wrangler.generated.jsonc
+pnpm build:cloudflare
+pnpm deploy -- --config wrangler.generated.jsonc --maintenance-config wrangler.maintenance.generated.jsonc
 ```
 
 **Server酱测试通知返回 HTTP 429？**

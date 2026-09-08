@@ -17,13 +17,18 @@ import {
   calculateOneTimeTermEndDate as calculateSharedOneTimeTermEndDate,
   isOneTimeBuyout,
   isOneTimeFixedTerm,
+  projectSubscriptionDailyCost,
+  toDailyAmountFromMonthly,
   toMonthlyAmount,
   toSubscriptionMonthlyAmount,
 } from "@renewlet/shared/subscription-billing";
+import { requireCustomBillingCycle } from "@renewlet/shared/subscription-renewal";
 
 export {
   isOneTimeBuyout,
   isOneTimeFixedTerm,
+  projectSubscriptionDailyCost,
+  toDailyAmountFromMonthly,
   toMonthlyAmount,
   toSubscriptionMonthlyAmount,
 };
@@ -34,7 +39,7 @@ export {
  * 规则：
  * - 未传 referenceDate 时，从 startDate 起加一个扣费周期，得到当前订阅周期的到期/下次扣费日期
  * - 传入 referenceDate 时，按 startDate 锚定周期，返回 referenceDate 当天或之后最近一次扣费日
- * - 自定义周期（custom）使用 customDays + customCycleUnit（默认 30 天）
+ * - 自定义周期（custom）必须显式提供 customDays + customCycleUnit
  * - 一次性购买（one-time）不产生下一次扣费，防御性返回开始日
  *
  * 注意：
@@ -46,7 +51,7 @@ export function calculateNextBillingDate(
   cycle: BillingCycle,
   customDays?: number,
   referenceDate?: DateOnly,
-  customCycleUnit: CustomCycleUnit = "day",
+  customCycleUnit?: CustomCycleUnit,
 ): DateOnly {
   return calculateSharedNextBillingDate(startDate, cycle, customDays, referenceDate, customCycleUnit) as DateOnly;
 }
@@ -63,12 +68,22 @@ export function customCycleUnitLabelKey(unit: CustomCycleUnit): `subscription.cu
   return `subscription.customCycleUnit.${unit}`;
 }
 
-export function formatBillingCycleLabel(subscription: { billingCycle: BillingCycle; customDays?: number | undefined; customCycleUnit?: CustomCycleUnit | undefined }, locale: Locale): string {
+export function formatBillingCycleLabel(subscription: {
+  billingCycle: BillingCycle;
+  customDays?: number | undefined;
+  customCycleUnit?: CustomCycleUnit | undefined;
+  oneTimeTermCount?: number | undefined;
+  oneTimeTermUnit?: CustomCycleUnit | undefined;
+}, locale: Locale): string {
+  if (subscription.billingCycle === "one-time") {
+    return translate(locale, isOneTimeFixedTerm(subscription)
+      ? "subscription.oneTimeMode.term"
+      : "subscription.oneTimeMode.buyout");
+  }
   if (subscription.billingCycle !== "custom") {
     return localizedLabel(CYCLE_LABELS[subscription.billingCycle], locale);
   }
-  const count = subscription.customDays ?? 1;
-  const unit = subscription.customCycleUnit ?? "day";
-  const unitLabel = translate(locale, customCycleUnitLabelKey(unit));
-  return translate(locale, "subscription.customCycleLabel", { count, unit: unitLabel });
+  const custom = requireCustomBillingCycle(subscription.customDays, subscription.customCycleUnit);
+  const unitLabel = translate(locale, customCycleUnitLabelKey(custom.unit));
+  return translate(locale, "subscription.customCycleLabel", { count: custom.count, unit: unitLabel });
 }

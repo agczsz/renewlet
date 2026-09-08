@@ -12,27 +12,35 @@
  * - 页面保留视图模式和布局，不承载业务规则。
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Header } from '@/components/header';
 import { BackToTopFloatButton } from '@/components/back-to-top-float-button';
-import { SubscriptionCard, type SubscriptionCardLookup } from '@/components/subscription-card';
+import { SubscriptionGrid } from '@/components/subscription-grid';
 import { SubscriptionDetailDialog } from '@/components/subscription-detail-dialog';
+import { AddToCalendarDialog } from '@/components/add-to-calendar-dialog';
 import { subscriptionFilterLayout } from '@/components/subscription-filter-layout';
 import { AddSubscriptionDialog } from '@/components/add-subscription-dialog';
 import { EditSubscriptionDialog } from '@/components/edit-subscription-dialog';
-import { RenewSubscriptionDialog } from '@/components/renew-subscription-dialog';
+import { DeferredRenewSubscriptionDialog } from '@/components/renew-subscription-dialog-loader';
 import { SubscriptionDialog } from '@/components/subscription-dialog';
-import { ImportDataDialog } from '@/components/import-data-dialog';
-import { AIRecognizeSubscriptionDialog } from '@/components/ai-recognize-subscription-dialog';
+import {
+  DeferredImportDataDialog,
+  preloadImportDataDialog,
+} from '@/components/import-data-dialog-loader';
+import {
+  DeferredAIRecognizeSubscriptionDialog,
+  preloadAIRecognizeSubscriptionDialog,
+} from '@/components/ai-recognize-subscription-dialog-loader';
 import { SubscriptionsPageSkeleton } from '@/components/loading-skeleton';
 import { SubscriptionCategoryFilter } from '@/components/subscription-category-filter';
 import { SubscriptionFilterFeedback } from '@/components/subscription-filter-feedback';
-import { VirtualizedList } from '@/components/ui/virtualized-list';
+import { QueryErrorState } from '@/components/query-error-state';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import type { Subscription, SubscriptionStatus } from '@/types/subscription';
+import type { Subscription, SubscriptionCollectionItem, SubscriptionStatus } from '@/types/subscription';
 import { BILLING_CYCLES, CYCLE_LABELS, DEFAULT_NOTIFICATION_REMINDER_DAYS, DEFAULT_SETTINGS } from '@/types/subscription';
 import { Search, Plus, Grid, List as ListIcon, Download, Upload, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -42,21 +50,27 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { useInfiniteSubscriptions, useSubscriptions } from '@/hooks/use-subscriptions';
-import { useCustomConfig } from '@/contexts/CustomConfigContext';
-import { useSettings } from '@/hooks/use-settings';
+import {
+  useInfiniteSubscriptions,
+  useSubscriptionFacets,
+  useSubscriptionIndex,
+} from '@/hooks/use-subscriptions';
+import { useCustomConfigState } from '@/contexts/CustomConfigContext';
+import { useSettingsEnvelope } from '@/hooks/use-settings';
 import { useSubscriptionCrud } from '@/modules/subscriptions/application/use-subscription-crud';
 import { useSubscriptionExport } from '@/modules/subscriptions/application/use-subscription-export';
 import { useSubscriptionFilters } from '@/modules/subscriptions/application/use-subscription-filters';
-import { SUBSCRIPTION_PAYMENT_METHOD_NONE_VALUE, type SubscriptionRenewalFilter, type SubscriptionSortOption } from '@/modules/subscriptions/domain/subscription-filters';
+import { SUBSCRIPTION_PAYMENT_METHOD_NONE_VALUE, type SubscriptionPaymentTypeFilter, type SubscriptionSortOption } from '@/modules/subscriptions/domain/subscription-filters';
 import { resolveSubscriptionPriceReferenceCurrency } from '@/modules/subscriptions/domain/subscription-price-reference';
 import { useExchangeRates } from '@/hooks/use-exchange-rates';
 import { useI18n } from '@/i18n/I18nProvider';
 import type { MessageKey } from '@/i18n/messages';
 import { useMediaQuery } from '@/hooks/use-media-query';
 import { useSubscriptionDetailDialog } from '@/hooks/use-subscription-detail-dialog';
+import { useSubscriptionCalendarDialog } from '@/hooks/use-subscription-calendar-dialog';
 import { useManagedCurrencyOptions } from '@/hooks/use-managed-currency-options';
-import { todayDateOnlyInTimeZone } from '@/lib/time/date-only';
+import { useZonedToday } from '@/hooks/use-zoned-today';
+import { syncSubscriptionCollectionBoundary } from '@/hooks/subscription-query-cache';
 import {
   SubscriptionTagFilterDrawer,
   SubscriptionTagFilterPopover,
@@ -66,12 +80,7 @@ import {
 } from '@/components/subscription-advanced-filter';
 
 /** 空订阅数组：用于在数据未加载完成时提供稳定引用，避免 useMemo 依赖抖动。 */
-const EMPTY_SUBSCRIPTIONS: Subscription[] = [];
-// 虚拟列表按“行”估算高度；网格模式一行可能包含 2-3 张卡片，估算值要覆盖最高卡片避免滚动跳动。
-const SUBSCRIPTION_GRID_ROW_GAP = 16;
-const SUBSCRIPTION_GRID_ROW_ESTIMATE = 220;
-const SUBSCRIPTION_LIST_ROW_ESTIMATE = 174;
-
+const EMPTY_SUBSCRIPTIONS: SubscriptionCollectionItem[] = [];
 const SORT_OPTION_LABEL_KEYS: Record<SubscriptionSortOption, MessageKey> = {
   default: "subscriptions.sort.default",
   renewal_asc: "subscriptions.sort.renewalAsc",
@@ -84,129 +93,33 @@ const SORT_OPTION_LABEL_KEYS: Record<SubscriptionSortOption, MessageKey> = {
   name_desc: "subscriptions.sort.nameDesc",
 };
 
-const RENEWAL_FILTER_LABEL_KEYS: Record<SubscriptionRenewalFilter, MessageKey> = {
-  all: "subscriptions.renewalFilter.all",
-  auto: "subscriptions.renewalFilter.auto",
-  manual: "subscriptions.renewalFilter.manual",
-  "one-time": "subscriptions.renewalFilter.oneTime",
+const PAYMENT_TYPE_FILTER_LABEL_KEYS: Record<SubscriptionPaymentTypeFilter, MessageKey> = {
+  all: "subscriptions.paymentTypeFilter.all",
+  auto: "subscriptions.paymentTypeFilter.auto",
+  manual: "subscriptions.paymentTypeFilter.manual",
+  "one-time-buyout": "subscriptions.paymentTypeFilter.buyout",
+  "one-time-fixed-term": "subscriptions.paymentTypeFilter.fixedTerm",
 };
-
-function getRootScrollElement() {
-  return typeof document === "undefined" ? null : document.getElementById("root");
-}
-
-function getSubscriptionColumnCount(viewMode: "grid" | "list", isTwoColumnGrid: boolean, isThreeColumnGrid: boolean) {
-  if (viewMode === "list") return 1;
-  if (isThreeColumnGrid) return 3;
-  if (isTwoColumnGrid) return 2;
-  return 1;
-}
-
-function chunkSubscriptions(subscriptions: Subscription[], columnCount: number) {
-  const rows: Subscription[][] = [];
-  for (let index = 0; index < subscriptions.length; index += columnCount) {
-    rows.push(subscriptions.slice(index, index + columnCount));
-  }
-  return rows;
-}
-
-type SubscriptionGridProps = {
-  subscriptions: Subscription[];
-  viewMode: "grid" | "list";
-  timeZone: string;
-  inheritedReminderDays: number;
-  currencyConvert: (amount: number | string, fromCurrency: string, toCurrency: string) => number;
-  currencyRatesReady: boolean;
-  priceReferenceCurrency: string | null;
-  categoryByValue: SubscriptionCardLookup;
-  paymentMethodByValue: SubscriptionCardLookup;
-  onEdit: (id: string) => void;
-  onDelete: (id: string) => void;
-  onClone: (id: string) => void;
-  onTogglePinned: (id: string) => void;
-  onTogglePublicHidden: (id: string) => void;
-  onRenew: (id: string) => void;
-  onViewDetails: (id: string) => void;
-};
-
-function SubscriptionGrid({
-  subscriptions,
-  viewMode,
-  timeZone,
-  inheritedReminderDays,
-  currencyConvert,
-  currencyRatesReady,
-  priceReferenceCurrency,
-  categoryByValue,
-  paymentMethodByValue,
-  onEdit,
-  onDelete,
-  onClone,
-  onTogglePinned,
-  onTogglePublicHidden,
-  onRenew,
-  onViewDetails,
-}: SubscriptionGridProps) {
-  const isTwoColumnGrid = useMediaQuery("(min-width: 640px)");
-  const isThreeColumnGrid = useMediaQuery("(min-width: 1024px)");
-  const columnCount = getSubscriptionColumnCount(viewMode, isTwoColumnGrid, isThreeColumnGrid);
-  const rows = useMemo(() => chunkSubscriptions(subscriptions, columnCount), [columnCount, subscriptions]);
-
-  // 分页列表从首屏起固定使用虚拟化，避免“加载更多”时切换 DOM/Virtualizer 模型导致浏览器滚动锚点漂移。
-  return (
-    <VirtualizedList
-      count={rows.length}
-      estimateSize={() => viewMode === "grid" ? SUBSCRIPTION_GRID_ROW_ESTIMATE : SUBSCRIPTION_LIST_ROW_ESTIMATE}
-      gap={SUBSCRIPTION_GRID_ROW_GAP}
-      getItemKey={(rowIndex) => rows[rowIndex]?.map((subscription) => subscription.id).join("|") ?? rowIndex}
-      getScrollElement={getRootScrollElement}
-      itemClassName={cn(
-        "grid items-stretch gap-4",
-        viewMode === "grid" ? "sm:grid-cols-2 lg:grid-cols-3" : "grid-cols-1",
-      )}
-      testId="virtualized-subscription-list"
-      renderItem={(rowIndex) => {
-        const row = rows[rowIndex];
-        if (!row) return null;
-
-        return row.map((sub) => (
-          <div key={sub.id} className="h-full">
-            <SubscriptionCard
-              subscription={sub}
-              viewMode={viewMode}
-              timeZone={timeZone}
-              inheritedReminderDays={inheritedReminderDays}
-              currencyConvert={currencyConvert}
-              currencyRatesReady={currencyRatesReady}
-              priceReferenceCurrency={priceReferenceCurrency}
-              categoryByValue={categoryByValue}
-              paymentMethodByValue={paymentMethodByValue}
-              onEdit={onEdit}
-              onDelete={onDelete}
-              onClone={onClone}
-              onTogglePinned={onTogglePinned}
-              onTogglePublicHidden={onTogglePublicHidden}
-              onRenew={onRenew}
-              onViewDetails={onViewDetails}
-            />
-          </div>
-        ));
-      }}
-    />
-  );
-}
 
 /** 订阅列表页组件。 */
-  const Subscriptions = () => {
+const Subscriptions = () => {
+  const settingsQuery = useSettingsEnvelope();
+  const timeZone = settingsQuery.data?.settings.timezone ?? "UTC";
+  const today = useZonedToday(timeZone);
+  const queryClient = useQueryClient();
+  const collectionBoundary = settingsQuery.data ? `${timeZone}:${today}` : null;
+  useEffect(() => {
+    if (collectionBoundary) void syncSubscriptionCollectionBoundary(queryClient, collectionBoundary);
+  }, [collectionBoundary, queryClient]);
+
   const subscriptionsQuery = useInfiniteSubscriptions();
   const subscriptions = subscriptionsQuery.subscriptions ?? EMPTY_SUBSCRIPTIONS;
+  const facetsQuery = useSubscriptionFacets();
   const { fetchNextPage } = subscriptionsQuery;
-  const settingsQuery = useSettings();
-  const timeZone = settingsQuery.data?.timezone ?? "UTC";
-  const defaultCurrency = settingsQuery.data?.defaultCurrency ?? "CNY";
-  const exchangeRateProvider = settingsQuery.data?.exchangeRateProvider;
-  const inheritedReminderDays = settingsQuery.data?.notificationReminderDays ?? DEFAULT_NOTIFICATION_REMINDER_DAYS;
-  const { config } = useCustomConfig();
+  const defaultCurrency = settingsQuery.data?.settings.defaultCurrency ?? "CNY";
+  const exchangeRateProvider = settingsQuery.data?.settings.exchangeRateProvider;
+  const inheritedReminderDays = settingsQuery.data?.settings.notificationReminderDays ?? DEFAULT_NOTIFICATION_REMINDER_DAYS;
+  const { config } = useCustomConfigState();
   const categoryByValue = useMemo(() => new Map(config.categories.map((category) => [category.value, category])), [config.categories]);
   const paymentMethodByValue = useMemo(() => new Map(config.paymentMethods.map((method) => [method.value, method])), [config.paymentMethods]);
   const { t, label, locale } = useI18n();
@@ -238,8 +151,8 @@ function SubscriptionGrid({
     setSelectedCategories,
     statusFilter,
     setStatusFilter,
-    renewalFilter,
-    setRenewalFilter,
+    paymentTypeFilter,
+    setPaymentTypeFilter,
     sortOption,
     setSortOption,
     selectedTags,
@@ -248,42 +161,52 @@ function SubscriptionGrid({
     setAdvancedFilters,
     allTags,
     filteredSubscriptions: localFilteredSubscriptions,
-    filterSubscriptionsForDisplay,
     sortSubscriptionsForDisplay,
+    selectSubscriptionsForExport,
     subscriptionListFilters,
     hasActiveFilters,
-    hasActiveControls,
+    needsCollectionIndex,
     toggleCategory,
     clearSelectedCategories,
     toggleTag,
     clearFilters,
-  } = useSubscriptionFilters(subscriptions, { defaultCurrency, convert, locale, timeZone });
-  const aggregateSubscriptionsQuery = useSubscriptions({
-    filters: subscriptionListFilters,
-    enabled: hasActiveControls,
+  } = useSubscriptionFilters(subscriptions, {
+    defaultCurrency,
+    convert,
+    locale,
+    today,
+    availableTags: facetsQuery.data?.tags ?? [],
   });
-  const aggregateSubscriptions = aggregateSubscriptionsQuery.data ?? EMPTY_SUBSCRIPTIONS;
-  const displaySourceSubscriptions = hasActiveControls ? aggregateSubscriptions : subscriptions;
-  // API 是全库筛选真相源；展示前只复核基础条件以收窄异常响应或测试 mock，不恢复旧的“已加载数据筛选”口径。
+  const indexQuery = useSubscriptionIndex(subscriptionListFilters, needsCollectionIndex);
+  const indexedSubscriptions = indexQuery.data?.subscriptions ?? EMPTY_SUBSCRIPTIONS;
+  const displaySourceSubscriptions = needsCollectionIndex ? indexedSubscriptions : subscriptions;
+  // index 已经是全库筛选真相源；客户端只应用用户选择的排序，不再读取轻量 DTO 中不存在的详情字段。
   const filteredSubscriptions = useMemo(
-    () => (
-      hasActiveControls
-        ? sortSubscriptionsForDisplay(filterSubscriptionsForDisplay(displaySourceSubscriptions))
-        : localFilteredSubscriptions
-    ),
-    [displaySourceSubscriptions, filterSubscriptionsForDisplay, hasActiveControls, localFilteredSubscriptions, sortSubscriptionsForDisplay],
+    () => needsCollectionIndex ? sortSubscriptionsForDisplay(displaySourceSubscriptions) : localFilteredSubscriptions,
+    [displaySourceSubscriptions, localFilteredSubscriptions, needsCollectionIndex, sortSubscriptionsForDisplay],
   );
-  const isDisplayPending = hasActiveControls && aggregateSubscriptionsQuery.isPending;
+  const isDisplayPending = needsCollectionIndex && indexQuery.isPending;
+  const displayError = needsCollectionIndex ? indexQuery.error : subscriptionsQuery.error;
+  const retryDisplayQuery = needsCollectionIndex ? indexQuery.refetch : subscriptionsQuery.refetch;
+  const displayedTotal = needsCollectionIndex ? (indexQuery.data?.total ?? 0) : subscriptionsQuery.total;
+  const unfilteredTotal = hasActiveFilters ? facetsQuery.data?.total : undefined;
   const {
     editingSubscription,
+    editingCollectionItem,
     editDialogOpen,
     cloningSubscription,
+    cloningCollectionItem,
     cloneDialogOpen,
     renewingSubscription,
+    renewingCollectionItem,
     renewDialogOpen,
+    editDetailPending,
+    cloneDetailPending,
+    renewDetailPending,
     renewError,
     renewSubmitting,
     renewRestoreFocusRef,
+    handlePrefetchSubscription,
     handleAddSubscription,
     handleDeleteSubscription,
     handleCloneSubscription,
@@ -298,24 +221,26 @@ function SubscriptionGrid({
     handleCloneDialogOpenChange,
     handleRenewDialogOpenChange,
   } = useSubscriptionCrud(displaySourceSubscriptions);
-  const settings = settingsQuery.data ?? DEFAULT_SETTINGS;
+  const settings = settingsQuery.data?.settings ?? DEFAULT_SETTINGS;
   const priceReferenceCurrency = resolveSubscriptionPriceReferenceCurrency(settings);
-  const { exportToJSON, exportToJSONWithSecrets, exportToCSV } =
-    useSubscriptionExport(filteredSubscriptions, displaySourceSubscriptions, config, settings, locale, timeZone, convert);
-  const today = useMemo(() => todayDateOnlyInTimeZone(new Date(), timeZone), [timeZone]);
+  const { exportToJSON, exportToJSONWithSecrets, exportToCSV, exporting } =
+    useSubscriptionExport(config, settings, locale, selectSubscriptionsForExport, today, convert);
   const {
     detailDialogOpen,
     selectedDetailSubscription,
+    selectedDetailCollectionItem,
+    detailPending,
     handleViewDetails,
     handleDetailDialogOpenChange,
   } = useSubscriptionDetailDialog(displaySourceSubscriptions);
-  const statusFilterLabel =
-    statusFilter === "all"
-      ? t("subscriptions.allStatuses")
-      : config.statuses.find((status) => status.value === statusFilter)?.labels
-        ? label(config.statuses.find((status) => status.value === statusFilter)!.labels)
-        : statusFilter;
-  const renewalFilterLabel = t(RENEWAL_FILTER_LABEL_KEYS[renewalFilter]);
+  const calendarDialog = useSubscriptionCalendarDialog(displaySourceSubscriptions);
+  const selectedStatus = config.statuses.find((status) => status.value === statusFilter);
+  const statusFilterLabel = statusFilter === "all"
+    ? t("subscriptions.allStatuses")
+    : selectedStatus
+      ? label(selectedStatus.labels)
+      : statusFilter;
+  const paymentTypeFilterLabel = t(PAYMENT_TYPE_FILTER_LABEL_KEYS[paymentTypeFilter]);
   const sortOptionLabel = t(SORT_OPTION_LABEL_KEYS[sortOption]);
   const removeSelectedTag = useCallback((tag: string) => {
     setSelectedTags((current) => current.filter((item) => item !== tag));
@@ -337,6 +262,9 @@ function SubscriptionGrid({
           variant="secondary"
           size="icon"
           onClick={() => setAIRecognitionDialogOpen(true)}
+          onFocus={preloadAIRecognizeSubscriptionDialog}
+          onPointerEnter={preloadAIRecognizeSubscriptionDialog}
+          onTouchStart={preloadAIRecognizeSubscriptionDialog}
           className="h-12 w-12 shrink-0 text-primary sm:h-10 sm:w-10"
           aria-label={t("subscriptions.aiRecognizeAdd")}
         >
@@ -370,8 +298,8 @@ function SubscriptionGrid({
           <div>
             <h1 className="text-2xl font-bold text-foreground">{t("subscriptions.title")}</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              {t("subscriptions.count", { count: filteredSubscriptions.length })}
-              {hasActiveFilters && ` ${t("subscriptions.filteredCount", { count: displaySourceSubscriptions.length })}`}
+              {t("subscriptions.count", { count: displayedTotal })}
+              {unfilteredTotal !== undefined && ` ${t("subscriptions.filteredCount", { count: unfilteredTotal })}`}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -387,13 +315,13 @@ function SubscriptionGrid({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem onClick={exportToJSON}>
+                <DropdownMenuItem onClick={exportToJSON} disabled={exporting}>
                   {t("subscriptions.exportJson")}
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={exportToJSONWithSecrets}>
+                <DropdownMenuItem onClick={exportToJSONWithSecrets} disabled={exporting}>
                   {t("subscriptions.exportJsonWithSecrets")}
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={exportToCSV}>
+                <DropdownMenuItem onClick={exportToCSV} disabled={exporting}>
                   {t("subscriptions.exportCsv")}
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -402,6 +330,9 @@ function SubscriptionGrid({
               type="button"
               variant="outline"
               onClick={() => setImportDialogOpen(true)}
+              onFocus={preloadImportDataDialog}
+              onPointerEnter={preloadImportDataDialog}
+              onTouchStart={preloadImportDataDialog}
               className="gap-2 border-border"
               aria-label={t("subscriptions.importData")}
             >
@@ -460,16 +391,17 @@ function SubscriptionGrid({
                 </Select>
               </div>
 
-              <div className="grid grid-cols-2 gap-3" data-testid="mobile-renewal-sort-row">
-                <Select value={renewalFilter} onValueChange={(v) => setRenewalFilter(v as SubscriptionRenewalFilter)}>
-                  <SelectTrigger className="h-11 min-w-0 border-border bg-secondary" tooltipContent={renewalFilterLabel}>
-                    <SelectValue placeholder={t("subscriptions.renewalFilter.label")} />
+              <div className="grid grid-cols-2 gap-3" data-testid="mobile-payment-type-sort-row">
+                <Select value={paymentTypeFilter} onValueChange={(v) => setPaymentTypeFilter(v as SubscriptionPaymentTypeFilter)}>
+                  <SelectTrigger className="h-11 min-w-0 border-border bg-secondary" tooltipContent={paymentTypeFilterLabel}>
+                    <SelectValue placeholder={t("subscriptions.paymentTypeFilter.label")} />
                   </SelectTrigger>
-                  <SelectContent mobileTitle={t("subscriptions.renewalFilter.label")}>
-                    <SelectItem value="all">{t("subscriptions.renewalFilter.all")}</SelectItem>
-                    <SelectItem value="auto">{t("subscriptions.renewalFilter.auto")}</SelectItem>
-                    <SelectItem value="manual">{t("subscriptions.renewalFilter.manual")}</SelectItem>
-                    <SelectItem value="one-time">{t("subscriptions.renewalFilter.oneTime")}</SelectItem>
+                  <SelectContent mobileTitle={t("subscriptions.paymentTypeFilter.label")}>
+                    <SelectItem value="all">{t("subscriptions.paymentTypeFilter.all")}</SelectItem>
+                    <SelectItem value="auto">{t("subscriptions.paymentTypeFilter.auto")}</SelectItem>
+                    <SelectItem value="manual">{t("subscriptions.paymentTypeFilter.manual")}</SelectItem>
+                    <SelectItem value="one-time-buyout">{t("subscriptions.paymentTypeFilter.buyout")}</SelectItem>
+                    <SelectItem value="one-time-fixed-term">{t("subscriptions.paymentTypeFilter.fixedTerm")}</SelectItem>
                   </SelectContent>
                 </Select>
 
@@ -523,7 +455,7 @@ function SubscriptionGrid({
                 billingCycleOptions={billingCycleOptions}
                 paymentMethodOptions={paymentMethodFilterOptions}
                 currencyOptions={currencyFilterOptions}
-                hasActiveControls={hasActiveControls}
+                hasActiveFilters={hasActiveFilters}
                 onClearFilters={clearFilters}
                 tagTestId="mobile-selected-tags"
                 advancedTestId="mobile-selected-advanced-filters"
@@ -569,15 +501,16 @@ function SubscriptionGrid({
                   </SelectContent>
                 </Select>
 
-                <Select value={renewalFilter} onValueChange={(v) => setRenewalFilter(v as SubscriptionRenewalFilter)}>
-                  <SelectTrigger className={subscriptionFilterLayout.desktopRenewalTrigger} tooltipContent={renewalFilterLabel}>
-                    <SelectValue placeholder={t("subscriptions.renewalFilter.label")} />
+                <Select value={paymentTypeFilter} onValueChange={(v) => setPaymentTypeFilter(v as SubscriptionPaymentTypeFilter)}>
+                  <SelectTrigger className={subscriptionFilterLayout.desktopPaymentTypeTrigger} tooltipContent={paymentTypeFilterLabel}>
+                    <SelectValue placeholder={t("subscriptions.paymentTypeFilter.label")} />
                   </SelectTrigger>
-                  <SelectContent mobileTitle={t("subscriptions.renewalFilter.label")}>
-                    <SelectItem value="all">{t("subscriptions.renewalFilter.all")}</SelectItem>
-                    <SelectItem value="auto">{t("subscriptions.renewalFilter.auto")}</SelectItem>
-                    <SelectItem value="manual">{t("subscriptions.renewalFilter.manual")}</SelectItem>
-                    <SelectItem value="one-time">{t("subscriptions.renewalFilter.oneTime")}</SelectItem>
+                  <SelectContent mobileTitle={t("subscriptions.paymentTypeFilter.label")}>
+                    <SelectItem value="all">{t("subscriptions.paymentTypeFilter.all")}</SelectItem>
+                    <SelectItem value="auto">{t("subscriptions.paymentTypeFilter.auto")}</SelectItem>
+                    <SelectItem value="manual">{t("subscriptions.paymentTypeFilter.manual")}</SelectItem>
+                    <SelectItem value="one-time-buyout">{t("subscriptions.paymentTypeFilter.buyout")}</SelectItem>
+                    <SelectItem value="one-time-fixed-term">{t("subscriptions.paymentTypeFilter.fixedTerm")}</SelectItem>
                   </SelectContent>
                 </Select>
 
@@ -629,7 +562,7 @@ function SubscriptionGrid({
                 billingCycleOptions={billingCycleOptions}
                 paymentMethodOptions={paymentMethodFilterOptions}
                 currencyOptions={currencyFilterOptions}
-                hasActiveControls={hasActiveControls}
+                hasActiveFilters={hasActiveFilters}
                 onClearFilters={clearFilters}
                 tagTestId="desktop-selected-tags"
                 advancedTestId="desktop-selected-advanced-filters"
@@ -639,7 +572,9 @@ function SubscriptionGrid({
           )}
         </div>
 
-        {isDisplayPending ? (
+        {displayError ? (
+          <QueryErrorState error={displayError} onRetry={retryDisplayQuery} />
+        ) : isDisplayPending ? (
           <div className="flex items-center justify-center rounded-xl border border-dashed border-border bg-card/50 py-16 text-sm text-muted-foreground">
             {t("common.loading")}
           </div>
@@ -648,11 +583,17 @@ function SubscriptionGrid({
             <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-secondary">
               <Search className="h-8 w-8 text-muted-foreground" />
             </div>
-            <h3 className="mb-2 text-lg font-medium text-foreground">{t("subscriptions.emptyTitle")}</h3>
+            <h3 className="mb-2 text-lg font-medium text-foreground">
+              {hasActiveFilters ? t("subscriptions.emptyFilteredTitle") : t("subscriptions.emptyNoDataTitle")}
+            </h3>
             <p className="mb-6 text-sm text-muted-foreground">
               {hasActiveFilters ? t("subscriptions.emptyFiltered") : t("subscriptions.emptyNoData")}
             </p>
-            {!hasActiveFilters && (
+            {hasActiveFilters ? (
+              <Button type="button" variant="outline" className="gap-2 border-border" onClick={clearFilters}>
+                {t("subscriptions.clearFilters")}
+              </Button>
+            ) : (
               <AddSubscriptionDialog 
                 onAdd={handleAddSubscription}
                 availableTags={allTags}
@@ -670,7 +611,7 @@ function SubscriptionGrid({
             <SubscriptionGrid
               subscriptions={filteredSubscriptions}
               viewMode={viewMode}
-              timeZone={timeZone}
+              today={today}
               inheritedReminderDays={inheritedReminderDays}
               currencyConvert={convert}
               currencyRatesReady={currencyRatesReady}
@@ -684,8 +625,10 @@ function SubscriptionGrid({
               onTogglePublicHidden={handleTogglePublicHiddenSubscription}
               onRenew={handleRenewSubscription}
               onViewDetails={handleViewDetails}
+              onAddToCalendar={calendarDialog.show}
+              onPrefetchDetails={handlePrefetchSubscription}
             />
-            {!hasActiveControls && subscriptionsQuery.hasNextPage && (
+            {!needsCollectionIndex && subscriptionsQuery.hasNextPage && (
               <div className="mt-6 flex justify-center [overflow-anchor:none]" data-testid="subscriptions-load-more-row">
                 <Button
                   type="button"
@@ -706,10 +649,12 @@ function SubscriptionGrid({
 
       <EditSubscriptionDialog
         subscription={editingSubscription}
+        loadingPreview={editingCollectionItem}
         open={editDialogOpen}
         onOpenChange={handleEditDialogOpenChange}
         onSave={handleSaveSubscription}
         availableTags={allTags}
+        loading={editDetailPending}
       />
       <SubscriptionDialog
         mode="create"
@@ -717,10 +662,13 @@ function SubscriptionGrid({
         onOpenChange={handleCloneDialogOpenChange}
         onSubmit={handleSaveClonedSubscription}
         initialSubscription={cloningSubscription}
+        loadingPreview={cloningCollectionItem}
         availableTags={allTags}
+        loading={cloneDetailPending}
       />
-      <RenewSubscriptionDialog
+      <DeferredRenewSubscriptionDialog
         subscription={renewingSubscription}
+        loadingPreview={renewingCollectionItem}
         open={renewDialogOpen}
         today={today}
         submitting={renewSubmitting}
@@ -728,33 +676,42 @@ function SubscriptionGrid({
         restoreFocusRef={renewRestoreFocusRef}
         onOpenChange={handleRenewDialogOpenChange}
         onSubmit={handleSubmitRenewSubscription}
+        loading={renewDetailPending}
       />
       <SubscriptionDetailDialog
         open={detailDialogOpen}
         onOpenChange={handleDetailDialogOpenChange}
         subscription={selectedDetailSubscription}
+        loadingPreview={selectedDetailCollectionItem}
         onEditSubscription={handleEditFromDetail}
         onRenewSubscription={handleRenewSubscription}
         today={today}
         currencyConvert={convert}
         currencyRatesReady={currencyRatesReady}
         priceReferenceCurrency={priceReferenceCurrency}
+        loading={detailPending}
       />
-      <ImportDataDialog
+      <AddToCalendarDialog
+        open={calendarDialog.open}
+        onOpenChange={calendarDialog.onOpenChange}
+        subscription={calendarDialog.subscription}
+        loadingPreview={calendarDialog.collectionItem}
+        loading={calendarDialog.pending}
+      />
+      <DeferredImportDataDialog
         open={importDialogOpen}
         onOpenChange={setImportDialogOpen}
         settings={settings}
         config={config}
       />
-      {aiRecognitionDialogOpen ? (
-        <AIRecognizeSubscriptionDialog
-          open={aiRecognitionDialogOpen}
-          onOpenChange={setAIRecognitionDialogOpen}
-          settings={settings}
-          config={config}
-          availableTags={allTags}
-        />
-      ) : null}
+      <DeferredAIRecognizeSubscriptionDialog
+        open={aiRecognitionDialogOpen}
+        onOpenChange={setAIRecognitionDialogOpen}
+        settings={settings}
+        apiKeyConfigured={settingsQuery.data?.secretStatus["aiRecognition.apiKey"].configured ?? false}
+        config={config}
+        availableTags={allTags}
+      />
     </div>
   );
 };

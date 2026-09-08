@@ -1,7 +1,12 @@
 import { z } from "zod";
-import { settingsUpdateBodySchema } from "./settings";
+import { persistedSettingsBackupSchema, type PersistedSettingsBackup } from "./settings";
+import { SUPPORTED_LOCALES } from "../i18n-config";
 import { customConfigSchema } from "./custom-config";
-import { apiSubscriptionSchema, subscriptionCreateBodySchema } from "./subscriptions";
+import {
+  createApiSubscriptionSchema,
+  logoReferenceSchema,
+  subscriptionCreateBodySchema,
+} from "./subscriptions";
 import { apiSuccessResponseSchema } from "./api";
 import { exchangeRateSnapshotV1Schema } from "./exchange-rates";
 
@@ -11,6 +16,8 @@ import { exchangeRateSnapshotV1Schema } from "./exchange-rates";
  * 预览允许大文件做冲突分析，但真正写库限制为较小批量，避免 Cloudflare D1/PocketBase 在一次请求里承担无界写入。
  */
 export const IMPORT_APPLY_SUBSCRIPTION_LIMIT = 200;
+export const IMPORT_PREVIEW_SUBSCRIPTION_LIMIT = 1000;
+export const IMPORT_PREVIEW_MAX_BYTES = 8 * 1024 * 1024;
 
 export const importConflictModeSchema = z.enum(["replace", "skip"]);
 export type ImportConflictMode = z.infer<typeof importConflictModeSchema>;
@@ -40,14 +47,14 @@ export type ImportSubscription = z.infer<typeof importSubscriptionSchema>;
 export const importPayloadSchema = z.object({
   source: importSourceSchema,
   // 导入 payload 是前端、Go route 与 Worker apply 共享契约；上限保护预览解析和冲突查询，不代表一次写库上限。
-  subscriptions: z.array(importSubscriptionSchema).max(5000),
-  settings: settingsUpdateBodySchema.optional(),
+  subscriptions: z.array(importSubscriptionSchema).max(IMPORT_PREVIEW_SUBSCRIPTION_LIMIT, "IMPORT_TOO_LARGE"),
+  settings: persistedSettingsBackupSchema.optional(),
   customConfig: customConfigSchema.optional(),
   exchangeRateSnapshots: z.array(exchangeRateSnapshotV1Schema).max(240).optional(),
 }).strict();
 export type ImportPayload = z.infer<typeof importPayloadSchema>;
 
-export const importSkipIndexesSchema = z.array(z.number().int().nonnegative()).max(5000);
+export const importSkipIndexesSchema = z.array(z.number().int().nonnegative()).max(IMPORT_PREVIEW_SUBSCRIPTION_LIMIT, "IMPORT_TOO_LARGE");
 export const importApplySkipIndexesSchema = z.array(z.number().int().nonnegative()).max(IMPORT_APPLY_SUBSCRIPTION_LIMIT);
 
 export const importPreviewRequestSchema = z.object({
@@ -61,7 +68,7 @@ export type ImportPreviewRequest = z.infer<typeof importPreviewRequestSchema>;
 export const importApplyRequestSchema = z.object({
   payload: importPayloadSchema.extend({
     // 执行阶段比预览更严格，因为 replace/create 会触发真实写库、资产引用和用户隔离校验。
-    subscriptions: z.array(importSubscriptionSchema).max(IMPORT_APPLY_SUBSCRIPTION_LIMIT),
+    subscriptions: z.array(importSubscriptionSchema).max(IMPORT_APPLY_SUBSCRIPTION_LIMIT, "IMPORT_TOO_LARGE"),
   }),
   conflictMode: importConflictModeSchema,
   skipIndexes: importApplySkipIndexesSchema.default([]),
@@ -128,19 +135,49 @@ const exportAssetLogoPathSchema = z
   .max(2048)
   .refine((value) => /^assets\/[^/][A-Za-z0-9._/-]*$/.test(value) && !value.includes(".."), "Invalid export asset path");
 
-const renewletExportSubscriptionSchema = apiSubscriptionSchema.safeExtend({
-  // 普通订阅 API 不接受 ZIP 内路径；export v1 只在备份包内允许 assets/...，导入时会先上传再改写成私有资产代理 URL。
-  logo: apiSubscriptionSchema.shape.logo.or(exportAssetLogoPathSchema).optional(),
-}).strict();
+const renewletExportSubscriptionSchema = createApiSubscriptionSchema(
+  logoReferenceSchema.or(exportAssetLogoPathSchema),
+);
+
+export const RENEWLET_EXPORT_SCHEMA_VERSION = 1;
+
+/**
+ * export v1 是已发布的稳定外部契约，语言字段早于当前持久化模型，不能直接复用数据库 settings schema。
+ * 这里单独锁定旧 `locale` 形状，避免内部 `localePreference` 演进意外破坏历史备份互导。
+ */
+export const renewletExportSettingsV1Schema = persistedSettingsBackupSchema
+  .omit({ localePreference: true })
+  .extend({ locale: z.enum(SUPPORTED_LOCALES).optional() })
+  .strict();
+export type RenewletExportSettingsV1 = z.infer<typeof renewletExportSettingsV1Schema>;
+
+/** 将当前设置投影到 v1；`auto` 没有等价旧值，必须省略而不能固化为导出设备的实际语言。 */
+export function toRenewletExportSettingsV1(settings: PersistedSettingsBackup): RenewletExportSettingsV1 {
+  const { localePreference, ...rest } = settings;
+  return renewletExportSettingsV1Schema.parse({
+    ...rest,
+    ...(localePreference && localePreference !== "auto" ? { locale: localePreference } : {}),
+  });
+}
+
+/** 将 v1 设置还原为局部更新；缺少 `locale` 表示保留目标账号偏好，不能补成 `auto`。 */
+export function fromRenewletExportSettingsV1(settings: RenewletExportSettingsV1 | undefined): PersistedSettingsBackup | undefined {
+  if (!settings) return undefined;
+  const { locale, ...rest } = settings;
+  return persistedSettingsBackupSchema.parse({
+    ...rest,
+    ...(locale ? { localePreference: locale } : {}),
+  });
+}
 
 export const renewletExportV1Schema = z.object({
   kind: z.literal("renewlet-export"),
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(RENEWLET_EXPORT_SCHEMA_VERSION),
   exportedAt: z.string(),
   data: z.object({
     // Export v1 保存 API 订阅形状而不是 UI 草稿形状，保证 Docker 与 Cloudflare 导出的数据可以互导。
     subscriptions: z.array(renewletExportSubscriptionSchema),
-    settings: settingsUpdateBodySchema.optional(),
+    settings: renewletExportSettingsV1Schema.optional(),
     customConfig: customConfigSchema.optional(),
     // 历史汇率快照是 data.json 的恢复事实源；manifest 只做审计，不能承载报表口径。
     exchangeRateSnapshots: z.array(exchangeRateSnapshotV1Schema).max(240).optional(),
@@ -166,7 +203,7 @@ export type RenewletExportMissingAsset = z.infer<typeof renewletExportMissingAss
 
 export const renewletExportManifestV1Schema = z.object({
   kind: z.literal("renewlet-export"),
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(RENEWLET_EXPORT_SCHEMA_VERSION),
   exportedAt: z.string(),
   subscriptions: z.number().int().nonnegative(),
   assets: z.number().int().nonnegative(),

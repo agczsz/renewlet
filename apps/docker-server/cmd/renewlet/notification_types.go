@@ -14,7 +14,6 @@ import (
 )
 
 const (
-	notificationStatusPending = "pending"
 	notificationStatusSending = "sending"
 	notificationStatusSent    = "sent"
 	notificationStatusFailed  = "failed"
@@ -61,7 +60,7 @@ type appSettings struct {
 	ThemeVariant                       string                    `json:"themeVariant"`
 	ThemeCustomColor                   themeCustomColor          `json:"themeCustomColor"`
 	ShowExpired                        bool                      `json:"showExpired"`
-	Locale                             string                    `json:"locale"`
+	LocalePreference                   string                    `json:"localePreference"`
 	DefaultCurrency                    string                    `json:"defaultCurrency"`
 	PublicStatusCurrency               string                    `json:"publicStatusCurrency"`
 	SubscriptionPriceReferenceEnabled  bool                      `json:"subscriptionPriceReferenceEnabled"`
@@ -314,10 +313,9 @@ type notificationHistoryPageResponse struct {
 	HasMore bool                     `json:"hasMore"`
 }
 
-type notificationHistoryResponse struct {
+type notificationOverviewResponse struct {
 	Summary  notificationHistorySummaryResponse `json:"summary"`
 	Upcoming []upcomingNotificationBatch        `json:"upcoming"`
-	History  notificationHistoryPageResponse    `json:"history"`
 }
 
 type notificationJobResultSettings struct {
@@ -465,6 +463,7 @@ type pushPlusSendResponse struct {
 	Data string `json:"data"`
 }
 
+// 默认设置用于注册、补建和后台缺行兜底；语言始终保存 auto，当前请求语言不得注入账号设置。
 func defaultAppSettings() appSettings {
 	return appSettings{
 		AdminUsername:                      "admin",
@@ -472,7 +471,7 @@ func defaultAppSettings() appSettings {
 		ThemeVariant:                       "emerald",
 		ThemeCustomColor:                   themeCustomColor{H: 160, S: 84, L: 39},
 		ShowExpired:                        true,
-		Locale:                             string(defaultAppLocale),
+		LocalePreference:                   string(autoLocalePreference),
 		DefaultCurrency:                    "CNY",
 		PublicStatusCurrency:               "inherit",
 		SubscriptionPriceReferenceEnabled:  false,

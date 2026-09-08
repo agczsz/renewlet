@@ -73,7 +73,7 @@ const publicStatusSubscriptionSchema = z.object({
   }).strict(),
   status: z.enum(SUBSCRIPTION_STATUSES),
   startDate: z.string().refine(isValidDateOnly).nullable(),
-  nextBillingDate: z.string().refine(isValidDateOnly),
+  nextBillingDate: z.string().refine(isValidDateOnly).nullable(),
   updatedAt: z.string().trim().min(1),
   price: moneyStringSchema.optional(),
   currency: z.string().trim().regex(/^[A-Z]{3}$/).optional(),
@@ -88,6 +88,31 @@ const publicStatusSubscriptionSchema = z.object({
 }).refine((value) => value.price === undefined || value.billingCycle !== undefined, {
   path: ["billingCycle"],
   message: "Billing cycle is required when price is exposed",
+}).refine((value) => {
+  if (value.billingCycle === undefined) {
+    return value.customDays === undefined
+      && value.customCycleUnit === undefined
+      && value.oneTimeTermCount === undefined
+      && value.oneTimeTermUnit === undefined;
+  }
+  if (value.billingCycle === "custom") {
+    return value.customDays !== undefined
+      && value.customCycleUnit !== undefined
+      && value.oneTimeTermCount === undefined
+      && value.oneTimeTermUnit === undefined;
+  }
+  if (value.billingCycle === "one-time") {
+    return value.customDays === undefined
+      && value.customCycleUnit === undefined
+      && (value.oneTimeTermCount === undefined) === (value.oneTimeTermUnit === undefined);
+  }
+  return value.customDays === undefined
+    && value.customCycleUnit === undefined
+    && value.oneTimeTermCount === undefined
+    && value.oneTimeTermUnit === undefined;
+}, {
+  path: ["billingCycle"],
+  message: "Billing cycle fields are inconsistent",
 });
 
 export const publicStatusPayloadSchema = z.object({
@@ -96,6 +121,7 @@ export const publicStatusPayloadSchema = z.object({
     showPrices: z.boolean(),
     currency: z.string().trim().regex(/^[A-Z]{3}$/).optional(),
     exchangeRateBasis: exchangeRateSnapshotPublicBasisSchema.optional(),
+    asOf: z.string().refine(isValidDateOnly),
     generatedAt: z.string().trim().min(1),
     truncated: z.boolean(),
   }).strict(),
@@ -150,6 +176,16 @@ export const publicStatusPayloadSchema = z.object({
         path: ["subscriptions", index, "price"],
         message: "Price projection must be hidden when prices are not exposed",
       });
+    }
+    if (subscription.billingCycle !== undefined) {
+      const buyout = subscription.billingCycle === "one-time" && subscription.oneTimeTermCount === undefined;
+      if (buyout !== (subscription.nextBillingDate === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["subscriptions", index, "nextBillingDate"],
+          message: "Only one-time buyouts omit the next billing date",
+        });
+      }
     }
   });
 });

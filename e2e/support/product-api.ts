@@ -12,6 +12,7 @@ export type ProductSubscriptionSeed = {
   paymentMethod?: string | null;
   startDate: string | null;
   nextBillingDate: string;
+  notes?: string;
   autoRenew?: boolean;
   autoCalculateNextBillingDate?: boolean;
   reminderDays?: number;
@@ -108,14 +109,28 @@ export async function updateProductSettings(page: Page, patch: JsonObject) {
     throw new Error(`Invalid settings response: ${currentResult.body}`);
   }
 
-  const aiRecognitionPatch = isRecord(patch.aiRecognition) && isRecord(currentSettings.aiRecognition)
-    ? { ...currentSettings.aiRecognition, ...patch.aiRecognition }
+  const aiRecognitionSecret = isRecord(patch.aiRecognition) && typeof patch.aiRecognition.apiKey === "string"
+    ? patch.aiRecognition.apiKey
+    : undefined;
+  const aiRecognitionPublicPatch = isRecord(patch.aiRecognition)
+    ? Object.fromEntries(Object.entries(patch.aiRecognition).filter(([key]) => key !== "apiKey"))
     : patch.aiRecognition;
+  const publicPatch = Object.fromEntries(Object.entries(patch).filter(([key]) => key !== "aiRecognition"));
+  const aiRecognitionPatch = isRecord(aiRecognitionPublicPatch) && isRecord(currentSettings.aiRecognition)
+    ? { ...currentSettings.aiRecognition, ...aiRecognitionPublicPatch }
+    : aiRecognitionPublicPatch;
   // 设置接口是严格 PUT 全量契约；E2E 只覆盖目标字段时也要先合并远端当前值，避免把其它设置误清空。
   const nextSettings = {
     ...currentSettings,
-    ...patch,
+    ...publicPatch,
     ...(aiRecognitionPatch === undefined ? {} : { aiRecognition: aiRecognitionPatch }),
+    ...(aiRecognitionSecret === undefined ? {} : {
+      secretUpdates: {
+        "aiRecognition.apiKey": aiRecognitionSecret
+          ? { action: "set", value: aiRecognitionSecret }
+          : { action: "clear" },
+      },
+    }),
   };
 
   const updateResult = await productApiFetch(page, "/api/app/settings", {
@@ -149,7 +164,7 @@ export async function createProductSubscriptionSeed(page: Page, seed: ProductSub
       publicHidden: false,
       trialEndDate: null,
       website: null,
-      notes: null,
+      notes: seed.notes ?? null,
       tags: seed.tags ?? [],
       reminderDays: seed.reminderDays ?? 3,
       repeatReminderEnabled: false,
@@ -161,4 +176,10 @@ export async function createProductSubscriptionSeed(page: Page, seed: ProductSub
   });
 
   expect(result.ok, `create subscription seed ${seed.name}: ${result.status} ${result.body}`).toBe(true);
+  const responseData = isRecord(result.json) && isRecord(result.json.data) ? result.json.data : null;
+  const subscription = responseData && isRecord(responseData.subscription) ? responseData.subscription : null;
+  if (!subscription || typeof subscription.id !== "string") {
+    throw new Error(`Invalid create subscription response: ${result.body}`);
+  }
+  return subscription.id;
 }

@@ -46,10 +46,6 @@ vi.mock("@/hooks/use-cropped-image-upload", () => ({
   }),
 }));
 
-vi.mock("@/components/image-crop-dialog", () => ({
-  ImageCropDialog: () => null,
-}));
-
 function expectMediaCandidateRequest(name: string) {
   const call = mocks.apiFetch.mock.calls.find(([url]) => url === "/api/app/media/candidates");
   expect(call?.[0]).toBe("/api/app/media/candidates");
@@ -180,7 +176,7 @@ describe("IconPicker", () => {
 
     render(<IconPicker value="https://example.com/icon.svg" onChange={onChange} />);
 
-    const icon = screen.getByAltText("Icon");
+    const icon = screen.getByAltText("图标");
     const iconPreview = icon.closest(".media-thumbnail-canvas");
     const clearIconButton = screen.getByRole("button", { name: "清除图标" });
     expect(icon).toHaveClass("media-thumbnail-image");

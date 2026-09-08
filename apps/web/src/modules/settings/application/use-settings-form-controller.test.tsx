@@ -32,6 +32,33 @@ describe("useSettingsFormController", () => {
     expect(mocks.refreshRates).not.toHaveBeenCalled();
   });
 
+  it("reports only successful manual exchange-rate refreshes", async () => {
+    const { result } = renderSettingsFormController();
+
+    await act(async () => {
+      await result.current.handleRefreshRates();
+    });
+
+    expect(mocks.refreshRates).toHaveBeenCalledWith(BASE_SETTINGS.exchangeRateProvider);
+    expect(mocks.toast.success).toHaveBeenCalledWith("最新汇率数据已获取");
+  });
+
+  it("does not report success when a manual exchange-rate refresh fails", async () => {
+    mocks.refreshRates.mockResolvedValue({
+      status: "failed",
+      error: "网络请求失败",
+      errorDetails: null,
+    });
+    const { result } = renderSettingsFormController();
+
+    await act(async () => {
+      await result.current.handleRefreshRates();
+    });
+
+    expect(mocks.toast.success).not.toHaveBeenCalled();
+    expect(mocks.toast.error).not.toHaveBeenCalled();
+  });
+
   it("does not expose the PocketBase admin entry in Cloudflare runtime", () => {
     mocks.isCloudflareRuntime = true;
 
@@ -184,9 +211,8 @@ describe("useSettingsFormController", () => {
       await result.current.handleSaveChanges();
     });
 
-    expect(mocks.updateSettingsMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
-      exchangeRateProvider: "exchange-api",
-    }));
+    const command = mocks.updateSettingsMutateAsync.mock.calls.at(0)?.at(0);
+    expect(command?.patch.exchangeRateProvider).toBe("exchange-api");
     expect(mocks.setTheme).not.toHaveBeenCalled();
   });
 
@@ -274,6 +300,11 @@ describe("useSettingsFormController", () => {
   });
 
   it("saves draft settings and refreshes rates only after the provider is saved", async () => {
+    mocks.refreshRates.mockResolvedValue({
+      status: "failed",
+      error: "网络请求失败",
+      errorDetails: null,
+    });
     const { result } = renderSettingsFormController();
 
     act(() => {
@@ -284,16 +315,13 @@ describe("useSettingsFormController", () => {
       await result.current.handleSaveChanges();
     });
 
-    expect(mocks.updateSettingsMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
-      exchangeRateProvider: "exchange-api",
-    }));
+    const command = mocks.updateSettingsMutateAsync.mock.calls.at(0)?.at(0);
+    expect(command?.patch.exchangeRateProvider).toBe("exchange-api");
     expect(mocks.refreshRates).toHaveBeenCalledWith("exchange-api");
     expect(result.current.settings.exchangeRateProvider).toBe("exchange-api");
     expect(result.current.hasUnsavedChanges).toBe(false);
-    expect(mocks.toast).toHaveBeenCalledWith({
-      title: "设置已保存",
-      description: "所有更改已同步。",
-    });
+    expect(mocks.toast.success).toHaveBeenCalledWith("设置已保存");
+    expect(mocks.toast.success).not.toHaveBeenCalledWith("最新汇率数据已获取");
   });
 
   it("saves settings appearance changes and clears the dedicated pending draft", async () => {
@@ -311,9 +339,8 @@ describe("useSettingsFormController", () => {
       await result.current.handleSaveChanges();
     });
 
-    expect(mocks.updateSettingsMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
-      themeMode: "light",
-    }));
+    const command = mocks.updateSettingsMutateAsync.mock.calls.at(0)?.at(0);
+    expect(command?.patch.themeMode).toBe("light");
     expect(result.current.hasUnsavedChanges).toBe(false);
     expect(localStorage.getItem(SETTINGS_APPEARANCE_PENDING_STORAGE_KEY)).toBeNull();
     expect(localStorage.getItem(SETTINGS_THEME_MODE_STORAGE_KEY)).toBeNull();
@@ -323,24 +350,19 @@ describe("useSettingsFormController", () => {
 
   it("remembers explicit locale preference only after saving a locale change", async () => {
     const { result } = renderSettingsFormController();
-    const nextLocale = BASE_SETTINGS.locale === "en-US" ? "zh-CN" : "en-US";
+    const nextPreference = BASE_SETTINGS.localePreference === "en-US" ? "zh-CN" : "en-US";
 
     act(() => {
-      result.current.updateSetting("locale", nextLocale);
+      result.current.updateSetting("localePreference", nextPreference);
     });
 
     await act(async () => {
       await result.current.handleSaveChanges();
     });
 
-    expect(mocks.updateSettingsMutateAsync).toHaveBeenCalledWith(expect.objectContaining({
-      locale: nextLocale,
-    }));
-    expect(mocks.setLocale).toHaveBeenLastCalledWith(nextLocale, {
-      persist: false,
-      markAsSaved: true,
-      rememberPreference: true,
-    });
+    const command = mocks.updateSettingsMutateAsync.mock.calls.at(0)?.at(0);
+    expect(command?.patch.localePreference).toBe(nextPreference);
+    expect(mocks.commitLocalePreference).toHaveBeenLastCalledWith(nextPreference);
   });
 
   it("keeps the draft dirty and shows the server restart hint when saving the provider hits PocketBase 400", async () => {
@@ -366,11 +388,45 @@ describe("useSettingsFormController", () => {
     expect(mocks.refreshRates).not.toHaveBeenCalled();
     expect(result.current.settings.exchangeRateProvider).toBe("exchange-api");
     expect(result.current.hasUnsavedChanges).toBe(true);
-    expect(mocks.toast).toHaveBeenCalledWith({
-      title: "保存失败",
+    expect(mocks.toast.error).toHaveBeenCalledWith("保存失败", {
       description: "无法保存汇率来源。服务端可能还没更新或重启，请重启后端服务后再试。",
-      variant: "destructive",
     });
+  });
+
+  it("rolls back only the locale preview to the latest remote baseline when saving settings fails", async () => {
+    const { result, rerender } = renderSettingsFormController();
+
+    act(() => {
+      mocks.remoteSettings = {
+        ...BASE_SETTINGS,
+        localePreference: "en-US",
+        recipientEmail: "updated@example.com",
+      };
+      rerender();
+    });
+
+    await waitFor(() => {
+      expect(result.current.settings.localePreference).toBe("en-US");
+      expect(result.current.settings.recipientEmail).toBe("updated@example.com");
+    });
+    expect(result.current.hasUnsavedChanges).toBe(false);
+    mocks.updateSettingsMutateAsync.mockRejectedValue(new Error("save failed"));
+
+    act(() => {
+      result.current.updateSetting("localePreference", "zh-CN");
+      result.current.updateSetting("monthlyBudget", "2333");
+    });
+
+    await act(async () => {
+      await result.current.handleSaveChanges();
+    });
+
+    expect(result.current.settings.localePreference).toBe("en-US");
+    expect(result.current.settings.recipientEmail).toBe("updated@example.com");
+    expect(result.current.settings.monthlyBudget).toBe("2333");
+    expect(result.current.hasUnsavedChanges).toBe(true);
+    expect(mocks.syncRemoteLocalePreference).toHaveBeenLastCalledWith("en-US");
+    expect(mocks.commitLocalePreference).not.toHaveBeenCalled();
   });
 
   it("discards draft settings and restores locale/theme previews", () => {
@@ -378,7 +434,7 @@ describe("useSettingsFormController", () => {
 
     act(() => {
       result.current.handleThemeModeChange("light");
-      result.current.updateSetting("locale", "en-US");
+      result.current.updateSetting("localePreference", "en-US");
     });
     expect(result.current.hasUnsavedChanges).toBe(true);
     expect(localStorage.getItem(SETTINGS_APPEARANCE_PENDING_STORAGE_KEY)).toBe("1");
@@ -389,13 +445,10 @@ describe("useSettingsFormController", () => {
     });
 
     expect(result.current.settings.themeMode).toBe(BASE_SETTINGS.themeMode);
-    expect(result.current.settings.locale).toBe(BASE_SETTINGS.locale);
+    expect(result.current.settings.localePreference).toBe(BASE_SETTINGS.localePreference);
     expect(result.current.hasUnsavedChanges).toBe(false);
     expect(mocks.setTheme).toHaveBeenLastCalledWith(BASE_SETTINGS.themeMode, { localOverride: false });
-    expect(mocks.setLocale).toHaveBeenLastCalledWith(BASE_SETTINGS.locale, {
-      persist: false,
-      markAsSaved: true,
-    });
+    expect(mocks.syncRemoteLocalePreference).toHaveBeenLastCalledWith(BASE_SETTINGS.localePreference);
     expect(localStorage.getItem(SETTINGS_APPEARANCE_PENDING_STORAGE_KEY)).toBeNull();
     expect(localStorage.getItem(SETTINGS_THEME_MODE_STORAGE_KEY)).toBeNull();
   });
@@ -448,10 +501,8 @@ describe("useSettingsFormController", () => {
       await result.current.handleSaveChanges();
     });
 
-    expect(mocks.toast).toHaveBeenCalledWith({
-      title: "保存失败",
+    expect(mocks.toast.error).toHaveBeenCalledWith("保存失败", {
       description: "请至少启用一个内置图标来源",
-      variant: "destructive",
     });
   });
 

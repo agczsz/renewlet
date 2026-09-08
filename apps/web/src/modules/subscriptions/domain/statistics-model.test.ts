@@ -3,30 +3,17 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CUSTOM_CONFIG } from "@/types/config";
 import { DISABLED_REMINDER_DAYS, INHERIT_REMINDER_DAYS, type Subscription } from "@/types/subscription";
 import { assertDateOnly } from "@/lib/time/date-only";
+import {
+  subscriptionCycleFixture,
+  type SubscriptionFixtureOverrides,
+} from "@/test/subscription-fixtures";
 import { buildDashboardStats } from "./dashboard-stats";
 import { buildStatisticsModel } from "./statistics-model";
 import { buildUpcomingReminderItems } from "./upcoming-reminders";
 import { moneyToNumber } from "@renewlet/shared/money";
 
-type RecurringBillingCycle = Exclude<Subscription["billingCycle"], "custom" | "one-time">;
 type SubscriptionBaseFixture = Omit<Subscription, "billingCycle" | "customDays" | "customCycleUnit" | "oneTimeTermCount" | "oneTimeTermUnit">;
-type SubscriptionOverrides = Partial<Omit<Subscription, "billingCycle" | "customDays" | "customCycleUnit" | "oneTimeTermCount" | "oneTimeTermUnit">> & (
-  | {
-      billingCycle?: RecurringBillingCycle;
-      customDays?: undefined;
-      customCycleUnit?: undefined;
-      oneTimeTermCount?: undefined;
-      oneTimeTermUnit?: undefined;
-    }
-  | {
-      billingCycle: "one-time";
-      customDays?: undefined;
-      customCycleUnit?: undefined;
-      oneTimeTermCount?: number | undefined;
-      oneTimeTermUnit?: Subscription["oneTimeTermUnit"];
-    }
-  | { billingCycle: "custom"; customDays?: number; customCycleUnit?: Subscription["customCycleUnit"] }
-);
+type SubscriptionOverrides = SubscriptionFixtureOverrides<Subscription>;
 
 const convert = (amount: number | string, from: string, to: string) => {
   const value = moneyToNumber(amount);
@@ -58,42 +45,15 @@ function subscription(overrides: SubscriptionOverrides): Subscription {
     repeatReminderEnabled: false,
     repeatReminderInterval: "1h",
     repeatReminderWindow: "72h",
+    extra: {},
     pinned: false,
     publicHidden: false,
   };
 
-  if (overrides.billingCycle === "custom") {
-    return {
-      ...base,
-      ...overrides,
-      billingCycle: "custom",
-      customDays: overrides.customDays ?? 30,
-      customCycleUnit: overrides.customCycleUnit ?? "day",
-      oneTimeTermCount: undefined,
-      oneTimeTermUnit: undefined,
-    };
-  }
-
-  if (overrides.billingCycle === "one-time") {
-    return {
-      ...base,
-      ...overrides,
-      billingCycle: "one-time",
-      customDays: undefined,
-      customCycleUnit: undefined,
-      oneTimeTermCount: overrides.oneTimeTermCount,
-      oneTimeTermUnit: overrides.oneTimeTermUnit,
-    };
-  }
-
   return {
     ...base,
     ...overrides,
-    billingCycle: overrides.billingCycle ?? "monthly",
-    customDays: undefined,
-    customCycleUnit: undefined,
-    oneTimeTermCount: undefined,
-    oneTimeTermUnit: undefined,
+    ...subscriptionCycleFixture(overrides),
   };
 }
 
@@ -114,6 +74,7 @@ describe("subscription statistics models", () => {
     });
 
     expect(model.totalMonthly).toBe(15);
+    expect(model.totalDaily).toBe(0.5);
     expect(model.activeCount).toBe(2);
     expect(model.inactiveCount).toBe(2);
     expect(model.monthlySavings).toBe(200);
@@ -124,15 +85,22 @@ describe("subscription statistics models", () => {
   it("keeps one-time purchases active but excludes them from recurring spend and upcoming renewals", () => {
     const oneTime = subscription({
       id: "lifetime",
+      category: "other",
       price: "199",
       status: "active",
       billingCycle: "one-time",
       nextBillingDate: assertDateOnly("2026-01-02"),
       autoCalculateNextBillingDate: false,
     });
+    const recurring = subscription({
+      id: "monthly",
+      category: "productivity",
+      price: "10",
+      nextBillingDate: assertDateOnly("2026-02-01"),
+    });
 
     const model = buildStatisticsModel({
-      subscriptions: [oneTime],
+      subscriptions: [oneTime, recurring],
       config: DEFAULT_CUSTOM_CONFIG,
       monthlyBudget: "0",
       defaultCurrency: "USD",
@@ -140,17 +108,23 @@ describe("subscription statistics models", () => {
       now: new Date("2026-01-10T00:00:00.000Z"),
     });
     const dashboard = buildDashboardStats({
-      subscriptions: [oneTime],
+      subscriptions: [oneTime, recurring],
       defaultCurrency: "USD",
       convert,
-      now: new Date("2026-01-01T00:00:00.000Z"),
+      today: assertDateOnly("2026-01-01"),
     });
 
-    expect(model.activeCount).toBe(1);
-    expect(model.totalMonthly).toBe(0);
+    expect(model.activeCount).toBe(2);
+    expect(model.totalMonthly).toBe(10);
+    expect(model.totalDaily).toBe(1 / 3);
+    expect(model.avgMonthlyPerSub).toBe(10);
+    expect(model.categoryData).toEqual([
+      expect.objectContaining({ name: "Productivity", value: 10 }),
+    ]);
     expect(model.inactiveCount).toBe(0);
-    expect(dashboard.activeSubscriptions).toHaveLength(1);
-    expect(dashboard.totalMonthly).toBe(0);
+    expect(dashboard.activeSubscriptions).toHaveLength(2);
+    expect(dashboard.totalMonthly).toBe(10);
+    expect(dashboard.totalDaily).toBe(1 / 3);
     expect(dashboard.upcomingCount).toBe(0);
   });
 
@@ -179,10 +153,11 @@ describe("subscription statistics models", () => {
       subscriptions: [fixedTerm],
       defaultCurrency: "USD",
       convert,
-      now: new Date("2026-01-01T00:00:00.000Z"),
+      today: assertDateOnly("2026-01-01"),
     });
 
     expect(model.totalMonthly).toBe(20);
+    expect(model.totalDaily).toBe(2 / 3);
     expect(model.totalAnnual).toBe(240);
     expect(model.thisMonthDue).toBe(0);
     expect(model.budgetUsedPercent).toBe(50);
@@ -190,6 +165,7 @@ describe("subscription statistics models", () => {
       expect.objectContaining({ value: 20 }),
     ]);
     expect(dashboard.totalMonthly).toBe(20);
+    expect(dashboard.totalDaily).toBe(2 / 3);
     expect(dashboard.upcomingCount).toBe(1);
   });
 
@@ -246,6 +222,7 @@ describe("subscription statistics models", () => {
     });
 
     expect(model.totalMonthly).toBe(77);
+    expect(model.totalDaily).toBe(77 / 30);
     expect(model.budgetRemaining).toBe(23);
   });
 
@@ -441,12 +418,14 @@ describe("subscription statistics models", () => {
     });
 
     expect(totalModel.totalMonthly).toBe(100);
+    expect(totalModel.totalDaily).toBe(100 / 30);
     expect(totalModel.thisMonthDue).toBe(100);
     expect(totalModel.trendData[0]).toEqual(expect.objectContaining({ cashflow: 100, amortized: 100 }));
     expect(totalModel.trendData[0]?.cashflowItems).toEqual([
       expect.objectContaining({ subscriptionId: "family-plan", amount: 100 }),
     ]);
     expect(personalModel.totalMonthly).toBe(40);
+    expect(personalModel.totalDaily).toBe(40 / 30);
     expect(personalModel.thisMonthDue).toBe(40);
     expect(personalModel.budgetUsedPercent).toBe(40);
     expect(personalModel.categoryData).toEqual([
@@ -486,7 +465,7 @@ describe("subscription statistics models", () => {
       defaultCurrency: "USD",
       convert,
       notificationReminderDays: 30,
-      now: new Date("2026-06-15T00:00:00.000Z"),
+      today: assertDateOnly("2026-06-15"),
     });
 
     expect(stats.upcomingCount).toBe(2);
@@ -522,7 +501,7 @@ describe("subscription statistics models", () => {
         }),
       ],
       notificationReminderDays: 30,
-      now: new Date("2026-06-15T00:00:00.000Z"),
+      today: assertDateOnly("2026-06-15"),
     });
 
     expect(items.map((item) => [item.subscription.id, item.daysUntil, item.kind, item.reminderDays])).toEqual([
@@ -543,7 +522,7 @@ describe("subscription statistics models", () => {
       ],
       defaultCurrency: "USD",
       convert,
-      now: new Date("2026-01-01T00:00:00.000Z"),
+      today: assertDateOnly("2026-01-01"),
     });
 
     expect(stats.upcomingCount).toBe(1);
